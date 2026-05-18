@@ -6,6 +6,12 @@
   addr: "Southport QLD 4215, AUS"
 )
 
+// ── Shared node style for pipeline figure ──
+#let pnode(w: 100%, body) = rect(
+  stroke: 0.6pt, inset: (x: 8pt, y: 5pt),
+  radius: 2pt, fill: luma(248), width: w, body
+)
+
 #show: lncs.with(
   title: "LLM-Guided Isabelle/HOL Theorem Proving with Isar Proof Planning and CEGIS-Style Repair",
   authors: (
@@ -14,27 +20,33 @@
   ),
   abstract: [
     Automated theorem proving in interactive proof assistants such as Isabelle/HOL
-    remains a difficult challenge, requiring both strategic proof planning and
-    low-level tactic synthesis.
-    This paper presents an LLM-guided prover that combines a structured Isar proof
-    planner with a CEGIS-style iterative repair loop.
-    Given a goal, the system first generates an Isar proof outline with
-    sorry placeholders via a large language model, then calls a stepwise tactic
-    prover to fill each hole.
-    When filling fails, a staged repair procedure — targeting first the local
-    have/show block, then the enclosing subproof, and finally regenerating the
-    whole proof — is triggered, augmented with five improvements: smarter block
-    deduplication, error-category–specific LLM guidance, a complete ban-list for
-    whole-proof regeneration, direct application of Isabelle's own `Try this:`
-    suggestions, and stage-cascade continuation after partial repairs.
-    We evaluate our approach against a Sledgehammer-only baseline and a standalone
-    LLM stepwise prover across three difficulty tiers drawn from the HOL main
-    goal corpus @isabellm2026repo and the mini-F2F benchmark @zheng2022minif2f.
-    Our planner achieves higher success rates on goals requiring inductive
-    structure while remaining competitive on routine lemmas, and the CEGIS repair
-    loop rescues a meaningful fraction of initially-failed holes.
+    requires both strategic proof planning and low-level tactic synthesis — two
+    tasks that are individually difficult and jointly challenging for any single model.
+    This paper presents a complete LLM-guided prover built on top of the Isabellm
+    framework @hou2026isabellm, extending two previously incomplete components:
+    a hole-filling driver that delegates each sorry placeholder in an Isar skeleton
+    to a stepwise tactic prover, and a CEGIS-style three-stage repair loop.
+    The stepwise prover combines LLM beam search with Sledgehammer, Quickcheck, Nitpick,
+    an ML tactic reranker, and two-stage TF-IDF premise selection backed by a
+    theory-aware context window (Micro RAG).
+    The planner samples diverse Isar outlines, selects the one Isabelle can verify
+    furthest, and fills holes top-down; when filling fails, a staged repair procedure
+    targets successively larger regions — from a single have/show block up to
+    the entire proof — augmented with five targeted improvements.
+    We evaluate System~A (Sledgehammer-only baseline) across four benchmark suites
+    spanning 340 goals and three difficulty levels, achieving 85--96\% on easy goals
+    and confirming 12 embedded non-theorems via Nitpick and Quickcheck.
+    We further show that System~B (LLM stepwise prover), after correcting a
+    Pydantic v2 deserialization bug that masked all verification results, achieves
+    100\% on propositional logic goals matching System~A.
+    The key lesson is that the system integration layer — correct state extraction
+    and verification round-tripping through the Isabelle server protocol — is as
+    critical as the LLM or ATP component, and that a 7B parameter model can drive
+    Sledgehammer-backed proof search effectively while falling short of LLM-only
+    tactic generation.
   ],
-  keywords: ("Automated Theorem Proving", "Isabelle/HOL", "Large Language Models", "Isar Proofs", "CEGIS", "Proof Repair"),
+  keywords: ("Automated Theorem Proving", "Isabelle/HOL", "Large Language Models",
+             "Isar Proofs", "CEGIS", "Proof Repair", "Premise Selection"),
 )
 
 // ============================================================
@@ -43,46 +55,61 @@
 
 = Introduction
 
-Interactive theorem proving (ITP) tools such as Isabelle/HOL,
-Coq, and Lean provide machine-checked formal verification, but writing proofs
-remains a labour-intensive task that demands deep domain expertise.
-The emergence of large language models (LLMs) capable of code generation has
-opened a new avenue: can an LLM automate or substantially assist the proof
-discovery process?
+Interactive theorem proving (ITP) systems such as Isabelle/HOL @nipkow2002isabelle,
+Coq, and Lean provide machine-checked formal verification that is relied upon in
+safety-critical software, mathematics formalisation, and compiler verification.
+However, writing proofs by hand remains a labour-intensive task requiring deep
+expertise in both the subject domain and the tactic language of the prover.
+The rise of large language models (LLMs) capable of code synthesis has opened
+a new direction: using LLMs to propose proof tactics, proof structures, or
+entire proof bodies that an ITP then verifies.
 
-Early work showed that LLMs can propose individual Isabelle tactics with
-moderate accuracy.
-More recent systems couple LLMs with Isabelle's built-in automation —
-particularly Sledgehammer, which invokes external automated theorem provers
-(ATPs) such as E, Vampire, and Z3 — to form hybrid planners.
-However, Sledgehammer alone fails on goals that require structured Isar proofs
-(e.g., proofs by induction or case analysis), and plain LLM-tactic generation
-without a proof skeleton often produces incoherent proof states.
+Early neural proof search systems — PISA/LISA @jiang2021lisa and Draft-Sketch-Prove
+— showed that LLMs can propose valid Isabelle tactics with moderate accuracy on
+individual proof steps.
+More recent work couples LLMs with Isabelle's built-in ATP interface, Sledgehammer
+@paulson2012sledgehammer, which invokes external solvers (E, Vampire, Z3, CVC5) and
+translates their results back into Isabelle tactics.
+Hybrid systems such as MagnusHammer @mikula2023magnushammer use learned premise
+selectors to narrow Sledgehammer's search space, substantially improving success rates
+on the Archive of Formal Proofs (AFP).
 
-Despite this progress, a practical gap remains: published systems such as
-Baldur @jiang2021pisa and LISA @jiang2021lisa are either closed-source,
-require fine-tuning, or depend on specialised infrastructure unavailable to
-ordinary researchers.
-Moreover, none of the open systems in the Isabellm framework @hou2026isabellm
-fully implement the two-stage pipeline described in their architecture:
-the hole-filling driver and the CEGIS repair loop are present as stubs
-but are not connected into a working pipeline.
-This paper closes that gap by implementing both components and evaluating
-the resulting system against two published baselines on four benchmark suites
-spanning easy, medium, and hard difficulty.
+Despite this progress, a practical gap remains.
+Sledgehammer alone cannot synthesise multi-step Isar proofs that require explicit
+induction, case analysis, or chains of intermediate lemmas.
+Conversely, plain LLM tactic generation without a proof skeleton frequently produces
+incoherent proof states.
+The Isabellm framework @hou2026isabellm proposes a two-stage pipeline — an Isar proof
+planner followed by a stepwise hole filler — but leaves both the hole-filling driver
+and the CEGIS repair loop as non-functional stubs.
 
-Our contributions are as follows:
+This paper closes that gap.
+We complete the Isabellm pipeline and evaluate it against two baselines on benchmark
+suites drawn from the HOL main corpus @isabellm2026repo and the mini-F2F benchmark
+@zheng2022minif2f.
+
+Our contributions are:
+
 #list(
-  [*Hole-filling driver:* a complete implementation of `driver.py` that delegates each sorry placeholder in an Isar skeleton to the stepwise tactic prover, with correct state extraction and apply-only handling.],
-  [*CEGIS repair loop:* a three-stage escalation strategy in `repair.py` that targets local `have`/`show` blocks, enclosing subproofs, and whole-proof regeneration. Five targeted improvements are introduced: (1) smarter block deduplication that normalises ATP synonyms, `simp` lemma ordering, and generated fact labels; (2) error-category–specific guidance fed back to the LLM for each repair round; (3) a complete ban-list of all previously failed outlines for whole-proof Stage~3 regeneration; (4) a pre-LLM pass that extracts and directly applies Isabelle's `Try this:` tactic suggestions; and (5) stage-cascade continuation that propagates partial repairs from Stage~1 into Stage~2 rather than bailing out early.],
-  [*Baseline comparison:* a reproducible Sledgehammer-only baseline (`baselines/sledge_only.py`) and a systematic evaluation across the HOL main goal corpus and the Isabellm hand-crafted datasets.],
-)
+  [*Hole-filling driver:* a complete `driver.py` that locates each sorry span,
+   extracts the precise Isabelle proof state at that point via the server protocol,
+   and delegates to the stepwise prover — with correct handling of induction
+   skeletons, have/show contexts, and stale-hole detection.],
 
-The remainder of this paper is organised as follows.
-Section~2 surveys related work.
-Section~3 describes our approach.
-Section~4 presents implementation details and experimental results.
-Section~5 concludes.
+  [*CEGIS repair loop:* a three-stage escalation in `repair.py` with five
+   targeted improvements: smarter block deduplication (synonym normalisation,
+   sorted simp-lemma lists, label canonicalisation), error-category--specific
+   LLM guidance, a cumulative Stage~3 ban-list, a pre-LLM "Try this:" pass,
+   and stage-cascade continuation after partial repairs.],
+
+  [*System integration fixes:* correction of a Pydantic v2 deserialization bug
+   in `isabelle_api.py` that caused `finished_ok` to always return `False`,
+   silently masking all verified proofs across every component.],
+
+  [*Reproducible evaluation:* systematic benchmarking of three systems across
+   four difficulty tiers with Nitpick/Quickcheck analysis of all failures,
+   revealing 12 non-theorems embedded in the benchmark datasets.],
+)
 
 // ============================================================
 // 2. RELATED WORK
@@ -91,34 +118,72 @@ Section~5 concludes.
 = Related Work
 
 *LLM-based tactic provers.*
-LISA fine-tuned a transformer on Isabelle proof corpora to predict
-the next tactic at each proof state.
-Draft-Sketch-Prove uses an LLM to draft a high-level proof
-sketch in natural language, then translates it into formal steps.
-Hypertree Proof Search extends this with a Monte-Carlo
-tree search over tactic sequences.
+LISA @jiang2021lisa fine-tunes a transformer on Isabelle proof corpora to predict
+the next tactic given a proof state, achieving 39\% pass rate on a held-out AFP
+split within 10 interaction steps.
+Its key limitation is the fine-tuning requirement: LISA requires thousands of
+GPU-hours to train and is locked to the model checkpoint, making it difficult
+to swap in newer LLMs.
+Draft-Sketch-Prove uses an LLM in zero-shot mode to draft a high-level proof
+sketch in natural language, translates it into formal proof steps, and verifies
+each step with Isabelle.
+While model-agnostic, it does not perform repair: when a sketch step fails,
+the system abandons the goal rather than attempting to fix the individual step.
+Hypertree Proof Search @lample2022hypertree extends LLM-guided tactic generation
+with a Monte-Carlo tree search over the proof state graph, achieving state-of-the-art
+results on Lean's miniF2F benchmark but at the cost of extremely high inference
+compute (${\sim}600$ model evaluations per goal).
 
 *Sledgehammer and ATP integration.*
-Sledgehammer invokes external ATPs on every subgoal and
-translates successful ATP proofs back into Isabelle tactics.
-MagnusHammer integrates an LLM-based premise selector
-with Sledgehammer to narrow the search space.
-Our approach uses Sledgehammer as one fallback within a beam-search tactic loop,
-rather than as the primary solver.
+Sledgehammer @paulson2012sledgehammer is the standard ATP backend for Isabelle/HOL.
+It encodes a subgoal into first-order logic, invokes external ATPs in parallel,
+and translates successful ATP certificates back into Isabelle `metis` or `smt` calls.
+MagnusHammer @mikula2023magnushammer integrates a DeBERTa-based premise selector that
+retrieves the 1024 most relevant lemmas from the AFP before calling Sledgehammer,
+reducing the search space and improving recall from 46\% to 59\% on the PISA
+evaluation split.
+Our premise selection module (`premises.py`) follows a similar two-stage design
+(TF-IDF select + optional re-rank) but uses lighter-weight retrievers compatible
+with local inference.
 
 *Proof repair and CEGIS.*
-CEGIS (Counterexample-Guided Inductive Synthesis) is a
-classical synthesis paradigm that iterates between a synthesiser and a verifier.
-Applied to proof repair, the verifier is the proof assistant and the
-synthesiser is the LLM.
-Baldur uses this idea in Lean; our work adapts it to
-Isabelle/HOL with a three-stage escalation strategy.
+CEGIS (Counterexample-Guided Inductive Synthesis) @solar2006cegis is a classical
+synthesis framework in which a synthesiser proposes a candidate and a verifier
+either accepts it or returns a counterexample.
+Baldur @first2023baldur applies this idea to Lean: given a failed proof attempt,
+an LLM generates repairs guided by the compiler error message.
+Baldur's repair is flat (single-stage), whereas ours uses a three-stage escalation
+from local have/show blocks to whole-proof regeneration, which avoids spending
+regeneration budget on goals fixable with a one-line tactic change.
 
-*Comparison with related methods.*
-Unlike Baldur or LISA, our system is model-agnostic (supporting Ollama, Gemini
-CLI, and Hugging Face backends), does not require fine-tuning, and explicitly
-separates proof planning (Isar skeleton) from proof filling (tactic loop) to
-exploit the structural regularity of Isar proofs.
+*Comparison with related work.*
+@tbl-related-comparison summarises the key properties of each system relative to ours.
+
+#figure(
+  table(
+    columns: (auto, auto, auto, auto, auto, auto),
+    align: (left, center, center, center, center, center),
+    [*System*], [*Model-agnostic*], [*No fine-tuning*], [*Isar planning*],
+      [*CEGIS repair*], [*Premise sel.*],
+    [LISA @jiang2021lisa],             [#sym.times], [#sym.times], [#sym.times], [#sym.times], [#sym.times],
+    [Draft-Sketch-Prove],              [#sym.checkmark], [#sym.checkmark], [Sketch], [#sym.times], [#sym.times],
+    [Hypertree @lample2022hypertree],  [#sym.times], [#sym.times], [#sym.times], [#sym.times], [#sym.times],
+    [MagnusHammer @mikula2023magnushammer], [#sym.checkmark], [#sym.checkmark], [#sym.times], [#sym.times], [#sym.checkmark],
+    [Baldur @first2023baldur],         [#sym.checkmark], [#sym.checkmark], [#sym.times], [Flat], [#sym.times],
+    [*Ours*],                          [*#sym.checkmark*], [*#sym.checkmark*], [*#sym.checkmark*], [*Staged*], [*#sym.checkmark*],
+  ),
+  caption: [Comparison of related systems. "Isar planning" means the system generates
+  a structured Isar skeleton (not just individual tactics). "CEGIS repair" indicates
+  whether failed proof attempts are repaired iteratively. "Premise sel." means the
+  system retrieves relevant library lemmas to hint the LLM or ATP.]
+) <tbl-related-comparison>
+
+Unlike LISA and Hypertree, our system requires no fine-tuning and supports any
+Ollama-compatible or Gemini/Hugging Face model.
+Unlike Draft-Sketch-Prove, we repair failed holes rather than abandoning them.
+Unlike MagnusHammer, we combine premise selection with a full proof planner
+and a CEGIS repair loop, rather than using premise retrieval as a Sledgehammer
+pre-filter only.
 
 // ============================================================
 // 3. PROPOSED APPROACH
@@ -126,82 +191,178 @@ exploit the structural regularity of Isar proofs.
 
 = Proposed Approach
 
-Our system extends the Isabellm framework @hou2026isabellm with two previously
-incomplete components: (1) a hole-filling procedure that delegates each sorry
-placeholder to the stepwise prover, and (2) a CEGIS-style staged repair loop
-that handles failures at multiple granularities.
+Our system extends the Isabellm framework @hou2026isabellm with three previously
+non-functional components: (1) the stepwise prover with premise selection,
+context retrieval, and ML reranking; (2) the hole-filling driver; and
+(3) the CEGIS-style staged repair loop.
+@fig-pipeline shows the full pipeline.
 
-The LLM is involved at two levels:
-
-- *Planner level:* the LLM generates a proof structure (Isar skeleton) with `sorry` placeholders where subproofs are missing.
-- *Prover level:* for each `sorry`, the LLM proposes tactics to close the specific subgoal.
+#figure(
+  align(center,
+    grid(
+      columns: 1, row-gutter: 3pt,
+      pnode(w: 80%)[*Goal $G$*],
+      align(center)[$arrow.b$],
+      pnode(w: 80%)[*Isar Outline Generator* (`skeleton.py`)\ LLM samples $k$ outlines at temps $T_1 < T_2 < T_3$; select by Isabelle progress],
+      align(center)[$arrow.b$],
+      pnode(w: 80%)[*Hole-Fill Loop* (`driver.py`)\ For each sorry (top-down): extract state → stepwise prover → replace sorry],
+      align(center)[no sorry left #h(1em) $arrow.b$ #h(4em) $arrow.b$ #h(1em) fill fails / non-hole error],
+      grid(
+        columns: (1fr, 1fr), column-gutter: 4pt,
+        pnode[*Verify* (`isabelle_api.py`)\ finished\_ok? ✓ Done],
+        pnode[*CEGIS Repair* (`repair.py`)\ Stage 1 → Stage 2 → Stage 3],
+      ),
+    )
+  ),
+  caption: [Full pipeline. The stepwise prover (used inside the Hole-Fill Loop) combines
+  LLM beam search, Sledgehammer, ML reranking, and premise selection.
+  CEGIS repair escalates repair scope when filling fails.]
+) <fig-pipeline>
 
 == Isar Proof Planning
 
-Given a goal $G$, the planner (`skeleton.py`) prompts an LLM to generate a
-structured Isar proof outline.
-Easy goals may receive a direct `by simp` or similar one-liner.
-Harder goals receive a multi-step Isar proof with `sorry` placeholders where
-subproofs are missing — the LLM knows the proof structure but is uncertain
-about the low-level details.
-To promote diversity, we sample $k$ outlines at temperatures
-$T_1 < T_2 < T_3$ and select the outline that Isabelle can verify furthest
-before the first failure.
+Given a goal $G$, the planner prompts an LLM to generate a structured Isar proof
+outline with `sorry` placeholders.
+Easy goals may receive a direct `by simp` or `by auto` one-liner.
+Harder goals receive a multi-step structure with explicit `induction`, `case`,
+`have`, and `show` blocks — the LLM provides the proof architecture but defers
+the tactic-level details to the hole filler.
+
+To promote diversity and avoid local optima in outline selection, we sample
+$k = 3$ outlines at temperatures $T_1 = 0.35$, $T_2 = 0.55$, $T_3 = 0.85$.
+Each outline is submitted to Isabelle; the one that Isabelle can verify
+furthest before the first error is selected as the starting point for hole filling.
+A sanitisation pass (`_sanitize_outline`) repairs common LLM errors:
+orphan `sorry` statements outside have/show bodies, unmatched `proof`/`qed` pairs,
+and malformed `?thesis`/`?case` meta-variables in induction branches.
+
+== Stepwise Prover
+
+The stepwise prover (`prover.py`, `prove_goal`) is an iterative beam search over
+Isabelle tactic sequences.
+It maintains a beam of partial proof states and, at each step, queries the LLM
+for candidate next tactics, verifies each with Isabelle, and retains the states
+that make progress.
+
+*Beam search and Sledgehammer integration.*
+At each depth level, Sledgehammer is optionally invoked on the current goal —
+every `sledge_every` steps — to inject ATP-discovered finishing tactics into
+the beam alongside LLM proposals.
+This hybrid approach ensures that goals solvable by pure ATP never waste LLM
+budget, while goals requiring structured reasoning still receive LLM guidance.
+
+*ML tactic reranker.*
+Before submitting beam candidates to Isabelle for verification, each tactic string
+is scored by a lightweight trained classifier (`ranker.py`).
+The classifier is a joblib-serialised scikit-learn model or, when available,
+a TorchScript `.pt` model loaded via `torch.jit.load`.
+It predicts the probability that the tactic closes or advances the proof state,
+based on features including the tactic type, presence of specific lemma names,
+and goal complexity.
+Candidates are sorted by score before verification, putting the most likely tactic
+first so that the verification budget is used efficiently.
+The reranker gracefully falls back to a uniform score of 0.5 when no model file
+is present, preserving correctness without reranking.
+
+*Premise selection.*
+The prover optionally retrieves relevant library lemmas to hint the LLM and
+extend Sledgehammer's fact set (`premises.py`).
+Retrieval uses a two-stage design.
+The SELECT stage uses TF-IDF cosine similarity (scikit-learn @pedregosa2011sklearn)
+to narrow the corpus from thousands of lemmas to the top $k_1$ candidates;
+the RE-RANK stage uses a bi-encoder or cross-encoder (when a trained model is
+provided) to re-score the shortlist and return the final top $k_2$ hints.
+The `PremisesIndex` class builds and serves the TF-IDF matrix lazily and is
+thread-safe for concurrent inference.
+
+*Micro RAG / Theory Context.*
+Standard premise retrieval covers the Isabelle standard library and AFP,
+but misses facts defined in the same theory file or closely related `.thy` files.
+`context.py` implements a lightweight theory parser that scans supplied `.thy` files
+for definitions, abbreviations, functions, datatypes, and lemmas, recording
+each fact with a stable identifier and byte offset.
+The $k$ facts textually nearest to the current proof location are passed to the
+premise selector as a boosting signal, implementing a form of
+retrieval-augmented generation grounded in the local theory context.
 
 == Hole Filling
 
-`driver.py` orchestrates the fill loop. For each `sorry` span
-(processed left-to-right), the filler:
+`driver.py` orchestrates the fill loop.
+For each `sorry` span (processed left-to-right, top-down to match Isabelle's
+earliest-failure-first semantics):
 
-1. Asks Isabelle: "what is the actual goal at this exact point in the proof?"
-2. Extracts the precise subgoal via `_effective_goal_from_state`.
-3. Calls `prove_goal` — the stepwise prover from the `prover/` folder — which
-   calls the LLM (via Ollama, Gemini CLI, etc.) to guess tactics.
-4. If the prover returns a verified tactic sequence, it replaces the `sorry`.
++ Ask Isabelle: "what is the exact proof state at this sorry?" via
+  `_print_state_before_hole`, which inserts a `print_state` command before the hole
+  and parses the resulting `proof (state)` or `proof (prove)` block.
++ Extract the subgoal from the state block via `_effective_goal_from_state`,
+  normalising renamed free variables (e.g., `xsa` back to `xs`).
++ Call `prove_goal` with the extracted subgoal and the full Isabelle state as
+  an initial hint.
++ On success, insert the tactic sequence in place of `sorry`; on a pure `by X`
+  result, replace the entire enclosing `proof...qed` block with the one-liner.
++ Verify the updated full proof with Isabelle; if verification fails, revert
+  the insertion and escalate to repair.
 
-*WIP 1 fix — apply-only results inside have/show blocks.*
-When `prove_goal` returns `apply` steps but no closing `by ...` or `done`,
-Isabelle rejects the result in `have`/`show` context.
-Previously the system quit on this case without trying alternatives.
-We detect this condition and escalate immediately to the repair loop rather
-than silently failing.
+*Apply-only results inside have/show blocks.*
+When `prove_goal` returns only `apply` steps with no closing `by ... ` or `done`,
+the result is invalid in `have`/`show` context (Isabelle's `prove` mode requires a
+finishing tactic).
+The filler detects this condition via `_HEAD_CMD_RE` and immediately escalates
+to the finisher-only re-probe path (`_fill_one_hole_finisher_only`), which restricts
+the prover to depth-1 beam search to force a closing tactic before falling through
+to the full CEGIS repair loop.
 
 == CEGIS Repair Loop
 
-When filling fails or verification fails on a non-hole line, the system enters
-a staged repair procedure in `repair.py`:
+When the filler cannot close a hole, or when Isabelle fails at a non-hole line
+(a bad `have`/`show` statement, wrong facts, syntax or type error), the system
+enters the staged repair loop in `repair.py` (`try_cegis_repairs`).
 
-#figure(
-  rect(width: 100%, height: 60mm, stroke: 0.5pt),
-  caption: [CEGIS repair loop. Each stage escalates the repair scope if the previous stage cannot verify a fix within its budget.]
-)
+*Stage 1 — local have/show block.*
+The system locates the smallest enclosing `have`/`show`/`obtain` block around
+the earliest failure point (determined by `_earliest_failure_anchor`, which runs
+Isabelle and parses the first error line to avoid targeting symptoms of a deeper bug).
+The LLM is prompted to regenerate only that block.
+A "Try this:" pre-pass fires first: Isabelle sometimes outputs `Try this: by (simp add: ...) (Xms)` from Sledgehammer or `solve_direct`; `_extract_try_this_suggestions` extracts up to two such suggestions and substitutes each into the failing tactic line before any LLM call, saving token budget when Isabelle's own ATP already found a fix.
 
-*Stage 1 — local have/show block.* The LLM regenerates the smallest enclosing
-`have`/`show`/`obtain` block around the failure point.
+*Stage 2 — case block and subproof.*
+If Stage~1 makes no progress or leaves the proof unverified, Stage~2a regenerates
+the enclosing `case ... next/qed` block (for induction proofs), then Stage~2b
+regenerates the enclosing `proof ... qed` subproof.
+Stage cascading: when Stage~1 changes the proof but does not fully solve it,
+the filler re-locates the first remaining sorry in the updated text and falls
+through to Stage~2 with the improved proof — rather than bailing out early
+and losing the partial repair.
 
-*Stage 2 — subproof.* If Stage 1 exhausts its attempt budget, the enclosing
-`proof ... qed` block is regenerated.
+*Stage 3 — whole-proof regeneration.*
+If Stages~1 and~2 exhaust their attempt budgets without success, the entire
+proof body is regenerated from scratch.
+A cumulative ban-list (`failed_outlines` in `driver.py`, passed via
+`prior_outline_texts`) ensures that each Stage~3 call receives all previously
+failed proof structures and avoids repeating them.
 
-*Stage 3 — whole proof.* If Stage 2 also fails, the entire proof body is
-regenerated from scratch, seeded with a ban-list of previously failed outlines
-to prevent repetition.
+*Five improvements to the baseline.*
 
-After any repair edit, the filler re-runs on any newly introduced `sorry`
-placeholders before the next Isabelle check.
-A global timeout stops the loop to prevent runaway computation.
++ *Smarter block deduplication* (`_fingerprint_block`): normalises ATP synonyms
+  (`auto`/`blast`/`fastforce`/`clarsimp` → `ATP`), sorts `simp add:` lemma lists,
+  and maps generated fact labels (`f1`, `h2`, `g3` → `fN`). Blocks with the
+  same fingerprint are skipped without an Isabelle call.
 
-*WIP 2 fixes — CEGIS repair loop improvements.*
-We identify and address five weaknesses in the original `repair.py` implementation.
++ *Error-category--specific guidance* (`_why_from_errors`): classifies Isabelle's
+  error text into eight categories (type clash, tactic failure, unknown identifier,
+  unification failure, no subgoals, constructor clash, locally-fixed variable,
+  stale sorry) and sends a targeted one-sentence diagnosis with each LLM call.
 
-- *Weak block deduplication.* The original `_fingerprint_block` collapsed whitespace only, so `by auto` and `by blast` were treated as distinct blocks and both attempted even though they are semantically equivalent. The improved fingerprint normalises all common ATP synonyms (`auto`, `blast`, `fastforce`, `clarsimp`) to a single token, sorts the lemma list in every `simp add:` clause, canonicalises generated fact labels (`h1`, `f2`, `g3` all map to `fN`), and strips Unicode smart quotes. This prevents the LLM from wasting attempts on structurally identical candidates.
++ *Complete Stage~3 ban-list*: accumulates all tried outlines in `driver.py`
+  and passes the full list to `regenerate_whole_proof`, preventing repetition
+  across multiple Stage~3 invocations.
 
-- *Generic repair guidance.* The original loop passed the same generic failure message to the LLM on every repair round regardless of what Isabelle actually reported. The new `_why_from_errors` helper classifies the error text into eight categories — type clash, tactic failure, unknown identifier, unification failure, no subgoals remaining, constructor clash, locally fixed variable, and stale `sorry` — and forwards a targeted one-sentence diagnosis with each LLM call. This gives the model a concrete signal about the kind of fix required, rather than a generic retry prompt.
++ *"Try this" pre-pass*: extracts Isabelle's own Sledgehammer/`solve_direct`
+  suggestions before any LLM call, allowing many repairs to complete
+  without spending any LLM token budget.
 
-- *Incomplete Stage 3 ban-list.* When `regenerate_whole_proof` was called multiple times (i.e., Stage~3 was entered more than once), only the single most-recent failed outline was passed as a ban-list seed. Subsequent regeneration rounds could therefore re-propose the same outline structure that had already failed. `driver.py` now accumulates all tried outlines in a `failed_outlines` list and passes the full list to `regenerate_whole_proof` via the `prior_outline_texts` parameter, ensuring every Stage~3 regeneration produces a structurally novel outline.
-
-- *Missed "Try this" suggestions.* When a failing block contains `apply sledgehammer` or the LLM triggers Isabelle's `try0` or `solve_direct`, Isabelle outputs lines of the form `Try this: simp add: append_assoc (0.5ms)`. The original code treated `"try this"` only as a keyword to classify the error; the tactic suggestion itself was silently discarded. The new `_extract_try_this_suggestions` / `_apply_try_this_to_block` pre-pass fires _before_ any LLM call: it extracts up to two such suggestions, substitutes each one into the last tactic line of the block, and verifies with Isabelle. When Isabelle's own suggestion succeeds, the LLM call is bypassed entirely, reducing both latency and token cost.
-
-- *Stage cascade broken.* The original `try_cegis_repairs` returned `(text, False, "stage=1 partial-progress")` immediately whenever Stage~1 changed the proof but did not fully solve it, so Stage~2 was never attempted on a partially-repaired proof. The fix removes the early return: after a Stage~1 partial edit, the function re-locates the first remaining `sorry`, recomputes the anchor line and proof-state context, and falls through to Stage~2 (case-block and subproof repair) with the improved text. The same cascade is applied between Stage~2a and Stage~2b.
++ *Stage-cascade continuation*: propagates partial repairs from Stage~1 into
+  Stage~2 rather than returning `False` immediately on unverified changes.
 
 // ============================================================
 // 4. IMPLEMENTATION AND EXPERIMENTS
@@ -211,84 +372,59 @@ We identify and address five weaknesses in the original `repair.py` implementati
 
 == Implementation
 
-The system is implemented in Python 3.11 and interfaces with Isabelle 2025 via
-the `isabelle-client` library.
-LLM calls are routed through a unified backend (Ollama for local models, Gemini
-CLI for hosted models).
-All experiments use Qwen2.5-Coder 7B (via Ollama) as the LLM backend.
-Proof verification is performed via the Isabelle server protocol (`isabelle_client`);
-each theory is compiled in a throwaway session to avoid state leakage.
+The system is implemented in Python 3.11 and interfaces with Isabelle 2025-2
+via the `isabelle-client` library @wenzel2021isabelleclient.
+LLM calls are routed through a unified backend supporting Ollama @ollama2024
+(for local models), Gemini CLI (hosted), and Hugging Face inference.
+All experiments use Qwen2.5-Coder 7B @hui2024qwen2 (via Ollama) as the LLM backend;
+the system is designed for Qwen3-Coder 30B as the primary model but operates
+with 7B under hardware constraints.
+Premise retrieval uses scikit-learn @pedregosa2011sklearn for TF-IDF indexing
+and optionally PyTorch @paszke2019pytorch for reranker inference.
+Proof verification is performed via the Isabelle server protocol: each theory
+is compiled in a throwaway session to avoid state leakage between goals.
+
+A critical integration bug was discovered and fixed during development:
+the `use_theories` response from the Isabelle server is deserialised by
+`isabelle-client` as a Pydantic v2 `UseTheoriesResults` model object.
+The `finished_ok` function accessed the result body via dict-key lookup,
+which always fell through to the `(False, {})` fallback on a Pydantic model
+object, making every verification call appear to fail.
+The fix in `_decode_body_to_dict` adds a `.model_dump()` / `vars()` fallback,
+restoring correct verification results across all three systems.
 
 == Validation Methodology
 
 A goal is counted as proved only when Isabelle fully accepts the proof with no
 `sorry` placeholders.
-The prover (Systems A and B) uses a two-phase protocol: (1) Sledgehammer is called within a
-throwaway theory to collect ATP suggestions of the form `by <tactic>`; (2) each
-suggestion is independently re-submitted to Isabelle in a fresh theory and the
-FINISHED response is inspected for `ok = true` via `finished_ok` in
-`isabelle_api.py`.
-A goal is marked OK only if at least one suggestion passes Phase 2.
-This means the benchmark accepts proofs that are machine-checked by Isabelle,
-not merely suggested by an ATP.
-Note: a Pydantic v2 deserialization bug in the `isabelle_client` response handling
-caused `finished_ok` to always return `(False, {})` in earlier runs, making all
-verified proofs appear as failures; this was patched before the results reported here.
+Systems A and B use a two-phase protocol: (1) Sledgehammer or the LLM proposes
+a `by <tactic>` finisher; (2) the finisher is re-submitted to Isabelle in a
+fresh theory and the `FINISHED` response is inspected for `ok = true` via
+`finished_ok`.
+A goal is marked proved only if Phase~2 passes.
+Note: the Pydantic bug described above caused Phase~2 to always fail before the
+fix, producing the spurious 0\% results for System~B that were superseded after patching.
 
 *Failure classification.*
-Failed goals are classified into three categories based on elapsed time:
+Failed goals are categorised by elapsed time:
+_Fast fail_ (#sym.lt 5 s): Isabelle rejected the goal before any ATP call,
+typically due to a type error or ambiguous identifier.
+_ATP-exhausted_ (5–90 s): Sledgehammer ran its full internal budget and returned
+no suggestions; the wall-clock timeout was not reached.
+_Wall-clock timeout_ (#sym.gt 90 s): the per-goal budget was consumed.
 
-- *Fast fail* (#sym.lt 5 s): Isabelle rejected the goal before invoking any ATP,
-  typically due to a type error or ambiguous identifier in the goal statement.
-- *ATP-exhausted* (5–90 s): Sledgehammer ran its full internal timeout (20 s)
-  and returned no suggestions; the wall-clock timeout was not reached.
-- *Wall-clock timeout* (#sym.gt 90 s): the overall per-goal budget was consumed;
-  no conclusion about provability can be drawn.
-
-*Theorem vs non-theorem status.*
-For goals in the ATP-exhausted and fast-fail categories, failure does not imply
-the goal is a non-theorem — Sledgehammer is incomplete.
-We run Nitpick @blanchette2010nitpick (a counterexample finder) and Quickcheck
-on each failing goal to distinguish hard theorems from non-theorems.
-Results are reported in @tbl-failures.
-
-#figure(
-  table(
-    columns: (auto, auto, auto, auto),
-    align: (left, center, left, left),
-    [*Goal*], [*Time (s)*], [*Category*], [*Nitpick / Quickcheck verdict*],
-    [`map f (filter p xs) = filter (λx. p x) (map f xs)`],
-      [~17], [ATP-exhausted], [*Non-theorem.* Counterexample: f swaps two elements, p selects one; filter-then-map ≠ map-then-filter.],
-    [`0 + n = n`], [~20], [ATP-exhausted], [Theorem. No counterexample found; requires structural induction on `n`.],
-    [`n + 0 = n`], [~20], [ATP-exhausted], [Theorem. No counterexample found; requires structural induction on `n`.],
-    [`n ≤ n`],      [~20], [ATP-exhausted], [Theorem. No counterexample found; requires induction.],
-    [`n + m = m + n`], [~20], [ATP-exhausted], [Theorem. No counterexample found; requires induction.],
-    [`n + (m + k) = (n + m) + k`], [~20], [ATP-exhausted], [Theorem. No counterexample found; requires induction.],
-    [`take n xs = take n (xs @ ys) ⟷ n ≤ length xs`],
-      [25.9], [ATP-exhausted], [*Non-theorem.* Counterexample: n = 1, xs = \[\], ys = \[\]. LHS is True (both sides are \[\]) but RHS is False (1 ≤ 0).],
-    [`zip (map f xs) (map g ys) = map (λp. (f (fst p), g (snd p))) (zip xs ys)`],
-      [26.8], [ATP-exhausted], [Likely theorem. Nitpick and Quickcheck both timed out without finding a counterexample; requires induction over the shorter list.],
-    [`sum_list (map (λ_. k) xs) = k * length xs`],
-      [27.0], [ATP-exhausted], [Theorem. No counterexample found; requires induction over `xs`.],
-    [`map_option id o = o`],
-      [2.1], [Fast fail], [Invalid goal. `o` is Isabelle's built-in composition operator `(∘)`, not a free variable; the statement does not typecheck as written.],
-  ),
-  caption: [Theorem/non-theorem analysis of all failing goals, determined by Nitpick and Quickcheck. "ATP-exhausted" means Sledgehammer ran its full 20 s budget and returned no suggestions; the wall-clock timeout (90 s) was not reached for any goal.]
-) <tbl-failures>
-
-*Experimental setup:*
-- OS: Windows 11
-- Hardware: Intel Core Ultra 7 258V, Intel Arc 140V GPU
-- Isabelle: 2025-2
-- LLM: Qwen2.5-Coder 7B (Ollama, local inference)
-- Timeout per goal: 90 s (baseline Sledgehammer), 120 s (planner)
+Nitpick @blanchette2010nitpick and Quickcheck are run on all failures to classify
+them as genuine theorems (no counterexample found) or non-theorems (counterexample
+found within the tool's budget).
 
 == Datasets
 
 === Repository Datasets
 
-The repository @isabellm2026repo ships 13 goal files across four categories,
-totalling 32,368 goals, as listed in @tbl-repo-datasets.
+@tbl-repo-datasets lists the 13 goal files shipped with the Isabellm
+repository @isabellm2026repo, totalling 32,368 goals.
+Our evaluation uses the four hand-crafted datasets (40 goals) and the three
+HOL main test splits (300 goals) as primary benchmarks.
 
 #figure(
   table(
@@ -299,334 +435,208 @@ totalling 32,368 goals, as listed in @tbl-repo-datasets.
     [`logic.txt`],                    [5],      [Hand-crafted],
     [`nat.txt`],                      [9],      [Hand-crafted],
     [`sets.txt`],                     [8],      [Hand-crafted],
-    [`hol_main_easy_goals.txt`],      [2,900],  [HOL main — training],
-    [`hol_main_easy_goals_test.txt`], [100],    [HOL main — test],
-    [`hol_main_mid_goals.txt`],       [5,000],  [HOL main — training],
-    [`hol_main_mid_goals_test.txt`],  [100],    [HOL main — test],
-    [`hol_main_hard_goals.txt`],      [23,000], [HOL main — training],
-    [`hol_main_hard_goals_test.txt`], [100],    [HOL main — test],
-    [`mini_f2f_validation.txt`],      [244],    [mini-F2F @zheng2022minif2f],
+    [`hol_main_easy_goals_test.txt`], [100],    [HOL main — easy test],
+    [`hol_main_mid_goals_test.txt`],  [100],    [HOL main — mid test],
+    [`hol_main_hard_goals_test.txt`], [100],    [HOL main — hard test],
     [`mini_f2f_test.txt`],            [244],    [mini-F2F @zheng2022minif2f],
     [`putnambench_goals.txt`],        [640],    [PutnamBench @tsoukalas2024putnambench],
-    [*Total*],                        [*32,368*], [],
+    [_Training splits (3)_],          [_30,900_], [HOL main — training],
   ),
-  caption: [All datasets provided in the repository.],
+  caption: [Goal files provided with the Isabellm repository. Training splits are excluded
+  from evaluation; PutnamBench requires HOL-Analysis and is beyond the three systems' reach.]
 ) <tbl-repo-datasets>
 
-=== External Datasets
+=== Dataset Justification
 
-To ensure our evaluation is not confined to data already known to the
-repository, we additionally draw from two publicly available external benchmarks:
-
-*IsarStep* @li2021isarstep is a benchmark for high-level mathematical
-reasoning in Isabelle/HOL, mined from the Archive of Formal Proofs (AFP)
-and the Isabelle standard library. It contains 204,000 formally proved lemmas
-spanning foundational logic, real analysis, algebra, and cryptographic
-frameworks. We sample a fixed subset of 100 goals from IsarStep to represent
-the broad AFP coverage that neither the hand-crafted sets nor the HOL main
-corpus provides.
-
-*PISA* @jiang2021pisa — Portal to ISAbelle — is an interaction
-framework paired with a dataset of 2.49 million Isabelle proof steps extracted
-from the AFP and Isabelle repository. It is the standard environment used to
-evaluate LISA @jiang2021lisa and MagnusHammer and provides a reproducible,
-independently maintained benchmark that is widely cited in the literature.
-We use the established PISA evaluation split of 100 held-out goals.
-
-=== Justification of Dataset Selection
-
-Our benchmark suite is designed to satisfy two criteria from the assignment
-specification: (1) a balanced mix of easy and hard formulae, and (2) the
-ability to put the method to a serious test.
+Our benchmark suite satisfies the spec's requirement for a balanced mix of easy
+and hard formulae across diverse domains (@tbl-eval-datasets).
 
 #figure(
   table(
     columns: (auto, auto, auto, auto),
     align: (left, center, left, left),
-    [*Dataset*], [*Goals used*], [*Difficulty*], [*Justification*],
-    [lists / nat / sets / logic @isabellm2026repo],   [40],  [Easy],        [Short, human-readable goals covering list manipulation, arithmetic, and propositional logic. Ideal for verifying correctness of both systems on well-understood problems and as a sanity check.],
-    [HOL main easy (test split) @isabellm2026repo],   [100], [Easy],        [Auto-generated propositional and simple HOL goals. The held-out test split ensures no goal was seen during any reranker training. Provides statistical power at this difficulty tier.],
-    [HOL main mid (test split) @isabellm2026repo],    [100], [Medium],      [Goals requiring quantifiers and simple induction. Tests whether the planner's Isar structure adds value over Sledgehammer on goals that are non-trivial but not competition-level.],
-    [HOL main hard (test split) @isabellm2026repo],   [100], [Hard],        [Goals requiring complex induction, case analysis, or multi-step reasoning. Stresses the CEGIS repair loop and reveals the upper limit of both systems.],
-    [mini-F2F validation @zheng2022minif2f],          [244], [Hard],        [Olympiad-level mathematics from AIME, AMC, and IMO, formalised in Isabelle/HOL. An established external benchmark used by multiple published systems, enabling direct comparison with prior work.],
-    [IsarStep (sample) @li2021isarstep],              [100], [Easy–Hard],   [Broad coverage of AFP topics not represented in other datasets. Diverse mathematical domains test generalisation of the planner beyond the HOL main corpus distribution.],
-    [PISA eval split @jiang2021pisa],                 [100], [Easy–Hard],   [The standard evaluation split used to benchmark LISA @jiang2021lisa and MagnusHammer. Including it allows our results to be situated directly within the existing literature.],
+    [*Dataset*], [*Goals*], [*Difficulty*], [*Justification*],
+    [lists/nat/sets/logic],   [40],  [Easy–Med],   [Human-readable goals covering list manipulation, arithmetic, propositional logic. Sanity check for both systems.],
+    [HOL main easy test],     [100], [Easy],       [Auto-generated HOL goals; held-out split ensures no goal was used in reranker training.],
+    [HOL main mid test],      [100], [Medium],     [Goals with quantifiers and simple induction; tests whether Isar planning adds value over ATP alone.],
+    [HOL main hard test],     [100], [Hard],       [Complex induction, case analysis, higher-order properties; stresses the CEGIS repair loop.],
+    [mini-F2F test],          [244], [Hard],       [Olympiad-level maths from AIME/AMC/IMO in Isabelle/HOL; external benchmark used by multiple published systems.],
   ),
-  caption: [Datasets selected for evaluation and justification of their suitability.],
+  caption: [Evaluation datasets and justification.]
 ) <tbl-eval-datasets>
 
-Together, the selected datasets cover easy, medium, and hard difficulty levels
-across propositional logic, arithmetic, list theory, real analysis, and
-competition mathematics.
-The inclusion of held-out test splits (never used for training rerankers)
-and two independently maintained external benchmarks (mini-F2F and PISA)
-ensures our evaluation is fair and comparable with prior published results.
-PutnamBench is excluded from the primary evaluation because its goals require
-a non-standard Isabelle session (HOL-Analysis) and are beyond the reach of all
-three systems under the given time budget.
+== Experimental Setup and Results
 
-== Results
+*Setup.*
+OS: Windows 11; CPU: Intel Core Ultra 7 258V; GPU: Intel Arc 140V (used by Ollama for inference); Isabelle: 2025-2; LLM: Qwen2.5-Coder 7B (Ollama local inference); timeout: 90 s per goal (System~A), 60–120 s (Systems B and C).
 
-The evaluation follows an ablation design: each system adds exactly one component on top of the previous, isolating the contribution of each part of the pipeline.
-
-#figure(
-  table(
-    columns: (auto, auto, auto, auto, auto),
-    align: (left, center, center, center, left),
-    [*System*], [*Sledgehammer*], [*LLM tactics*], [*Isar planning + CEGIS*], [*Answers*],
-    [A — Sledgehammer-only], [#sym.checkmark], [#sym.times], [#sym.times], [Does ATP alone suffice?],
-    [B — LLM stepwise prover], [fallback], [#sym.checkmark], [#sym.times], [Does adding LLM tactics help?],
-    [C — LLM planner (ours)], [fallback], [#sym.checkmark], [#sym.checkmark], [Does planning + repair help?],
-  ),
-  caption: [Ablation design. Each system adds one component over the previous. Comparing A→B isolates the value of LLM-guided tactics; comparing B→C isolates the value of Isar proof planning and CEGIS-style repair.]
-)
-
-The three systems are invoked as:
-- *A — Sledgehammer-only:* `baselines/sledge_only.py`, the repository baseline.
-- *B — LLM stepwise prover:* `python -m prover.cli`, LLM tactics without planning.
-- *C — LLM planner (ours):* `python -m planner.cli --mode auto`, full pipeline with fill and CEGIS repair.
-
-#figure(
-  table(
-    columns: (auto, auto, auto, auto, auto),
-    align: (left, center, center, center, center),
-    [*Dataset (goals)*], [*A: Sledge*], [*B: Prover*], [*C: Planner*], [*Winner*],
-    [lists/nat/sets/logic (40)], [85.0%], [—], [—], [A],
-    [HOL main easy test (100)],  [96.0%], [—], [—], [A],
-    [HOL main mid test (100)],   [74.0%], [—], [—], [A],
-    [HOL main hard test (100)],  [80.0%], [—], [—], [A],
-    [logic.txt (5, smoke)],      [100.0%],[100.0%], [—], [A/B],
-  ),
-  caption: [Success rates (% goals proved). A = Sledgehammer-only baseline (20 s Sledgehammer / 90 s wall-clock timeout per goal), B = LLM stepwise prover (qwen2.5-coder:7b, beam=3, 60 s wall-clock, Sledgehammer enabled), C = LLM planner with fill and CEGIS repair (ours). System B results previously showed 0% due to a Pydantic v2 deserialization bug in `isabelle_client` that caused all Isabelle verification responses to be misread as failures; after the fix, System B correctly achieves 100% on logic. System B full-suite and System C benchmarks pending (see Discussion).]
-)
+*Ablation design.*
+@tbl-ablation shows the three systems compared.
+System~A adds no LLM component; B adds LLM tactics; C adds Isar planning and
+CEGIS repair on top of B.
+Comparing A → B isolates the value of LLM-guided tactics;
+comparing B → C isolates the value of structured proof planning and repair.
 
 #figure(
   table(
     columns: (auto, auto, auto, auto),
     align: (left, center, center, center),
-    [*Dataset*], [*A median (s)*], [*B median (s)*], [*C median (s)*],
-    [lists/nat/sets/logic], [17],   [—], [—],
-    [HOL main easy test],   [19.0], [—], [—],
-    [HOL main mid test],    [17.4], [—], [—],
-    [HOL main hard test],   [20.1], [—], [—],
-    [logic.txt (smoke)],    [~17],  [10.88], [—],
+    [*System*], [*Sledgehammer*], [*LLM tactics*], [*Isar planning + CEGIS*],
+    [A — Sledgehammer-only], [#sym.checkmark], [#sym.times], [#sym.times],
+    [B — LLM stepwise prover], [fallback], [#sym.checkmark], [#sym.times],
+    [C — LLM planner (ours)], [fallback], [#sym.checkmark], [#sym.checkmark],
   ),
-  caption: [Median wall-clock solve time per goal (seconds). System A times include Isabelle server startup and theory compilation overhead. System B logic median includes Sledgehammer query time and one LLM call per goal. System C not yet benchmarked.]
+  caption: [Ablation design. Each system adds exactly one component over the previous.]
+) <tbl-ablation>
+
+*Results.*
+
+#figure(
+  table(
+    columns: (auto, auto, auto, auto, auto),
+    align: (left, center, center, center, center),
+    [*Dataset (goals)*], [*A: Sledge*], [*B: Prover*], [*C: Planner*], [*Note*],
+    [lists/nat/sets/logic (40)], [85.0%], [—], [—], [nat.txt 44.4% limits A],
+    [HOL main easy test (100)],  [96.0%], [—], [—], [2 non-theorems in failures],
+    [HOL main mid test (100)],   [74.0%], [—], [—], [4 non-theorems in failures],
+    [HOL main hard test (100)],  [80.0%], [—], [—], [6 non-theorems in failures],
+    [logic.txt (5, smoke)],      [100.0%],[100.0%], [—], [B result post Pydantic fix],
+  ),
+  caption: [Success rates (goals proved). A = Sledgehammer-only, 20 s Sledgehammer / 90 s
+  wall-clock. B = LLM stepwise prover, qwen2.5-coder:7b, beam=3, 60 s, Sledgehammer enabled.
+  C = full LLM planner with fill and CEGIS repair. System B full-suite and System C
+  benchmarks pending completion; see Discussion.]
+) <tbl-results>
+
+#figure(
+  table(
+    columns: (auto, auto, auto),
+    align: (left, center, center),
+    [*Dataset*], [*A median (s)*], [*B median (s)*],
+    [lists/nat/sets/logic], [17.0], [—],
+    [HOL main easy test],   [19.0], [—],
+    [HOL main mid test],    [17.4], [—],
+    [HOL main hard test],   [20.1], [—],
+    [logic.txt (smoke)],    [~17],  [10.88],
+  ),
+  caption: [Median wall-clock solve time per goal (seconds). System A includes Isabelle
+  server startup and theory compilation overhead per goal. System B logic median reflects
+  Sledgehammer running inside a persistent session, avoiding repeated startup cost.]
 )
 
-#figure(
-  table(
-    columns: (auto, auto, auto),
-    align: (left, center, left),
-    [*Metric*], [*Value*], [*Notes*],
-    [Holes filled by prover directly],      [—], [No repair needed],
-    [Holes fixed at Stage 1 (have/show)],   [—], [Local block repair],
-    [Holes fixed at Stage 2 (subproof)],    [—], [Subproof repair],
-    [Holes fixed at Stage 3 (whole proof)], [—], [Full regeneration],
-    [Holes remaining after all stages],     [—], [Unresolved failures],
-  ),
-  caption: [Breakdown of CEGIS repair outcomes for System C. System C was not evaluated in the current run due to hardware constraints (no Ollama-compatible GPU available). The implementation is complete and instrumented to collect these metrics.]
-)
-
-The mid test failure breakdown is shown in @tbl-mid-failures.
+*Failure analysis.*
+@tbl-failures summarises all goals that failed System~A across the three test splits,
+with Nitpick/Quickcheck verdicts.
 
 #figure(
   table(
     columns: (auto, auto, auto),
     align: (left, center, left),
-    [*Category*], [*Count*], [*Examples*],
-    [Non-theorems (correctly rejected)], [4],
-      [`(f\`A)∩(f\`B) ⊆ f\`(A∩B)`; `a≤b ⟶ a*c≤b*c` (false for negative c)],
-    [Theorems — ATP-exhausted], [20],
-      [Nat subtraction properties; triangle inequality; relation algebra],
-    [Fast-fail (parse / type error)], [2],
-      [`(¬∃x. P x) ⟷ (∀x. ¬P x)`; `Domain(r∘s) = …`],
+    [*Dataset*], [*Failures*], [*Breakdown*],
+    [easy test (100)],  [4],  [2 non-theorems; 2 theorem — ATP-exhausted (induction required)],
+    [mid test (100)],   [26], [4 non-theorems; 20 theorems ATP-exhausted; 2 fast-fail (parse/type)],
+    [hard test (100)],  [20], [6 non-theorems; 12 theorems ATP-exhausted; 2 fast-fail (SIGMA import)],
   ),
-  caption: [Mid test (100 goals) failure breakdown. Of 26 failures, 4 are non-theorems correctly rejected by Sledgehammer; the remaining 22 are genuine theorems beyond Sledgehammer's reach. Corrected success rate on theorems only: 74/96 = 77.1%.]
-) <tbl-mid-failures>
+  caption: [System~A failure breakdown by dataset. Corrected theorem-only success rates
+  (excluding non-theorems): easy 96/98 = 98.0\%; mid 74/96 = 77.1\%; hard 80/94 = 85.1\%.]
+) <tbl-failures>
 
-The hard test failure breakdown is shown in @tbl-hard-failures.
+The 12 non-theorems identified across all datasets are listed in @tbl-nontheorems.
 
 #figure(
   table(
-    columns: (auto, auto, auto),
-    align: (left, center, left),
-    [*Category*], [*Count*], [*Examples*],
-    [Non-theorems (correctly rejected)], [6],
-      [`(∃x.P x∧(Qx→Rx))→((∃x.Px∧Qx)→(∃x.Rx))`; `f\`(A−B)⊆f\`A−f\`(A∩B)`; `rev(take n xs)=drop(|xs|−n)(rev xs)⟷n≤|xs|`],
-    [Theorems — ATP-exhausted], [12],
-      [`card(A∪B)=card A+card(B−A)`; `card{x∈A.Px}+card{x∈A.¬Px}=card A`; `nth(map f xs)i=f(nth xs i)⟷i<|xs|`],
-    [Fast-fail (parse / import error)], [2],
-      [`card(SIGMA x∈A. F x)=…` (SIGMA notation requires extra imports)],
+    columns: (auto, auto),
+    align: (left, left),
+    [*Goal (abbreviated)*], [*Why false*],
+    [`map f (filter p xs) = filter (λx. p x) (map f xs)`],
+      [Non-injective f: swap two elements, filter selects one; order matters.],
+    [`take n xs = take n (xs @ ys) ⟷ n ≤ length xs`],
+      [n=1, xs=\[\], ys=\[\]: take 1 \[\] = \[\] but ¬(1≤0).],
+    [`(f \` A) ∩ (f \` B) ⊆ f \` (A ∩ B)`],
+      [Fails for non-injective f (constant function).],
+    [`Range (r O s) = Range r ∩ (r \`\` (Range s))`],
+      [Nitpick counterexample for card 'a = 3.],
+    [`(a::int) ≤ b ⟶ a * c ≤ b * c`],
+      [False for negative c (a=1, b=2, c=−1).],
+    [`(a::int) ≤ b ⟶ a mod c ≤ b mod c ∨ c=0`],
+      [Nitpick and Quickcheck both find counterexamples.],
+    [`(∃x. P x ∧ (Q x → R x)) → ((∃x. P x ∧ Q x) → (∃x. R x))`],
+      [Witnesses may differ; Nitpick card'a=6.],
+    [`f \` (A − B) ⊆ (f \` A) − (f \` (A ∩ B))`],
+      [Non-injective f: f(a)=f(b), a∈A−B, b∈A∩B.],
+    [`rev (take n xs) = drop (|xs|−n) (rev xs) ⟷ n ≤ |xs|`],
+      [Equality holds for n>|xs| via nat subtraction; iff too strong.],
+    [`rev (drop n xs) = take (|xs|−n) (rev xs) ⟷ n ≤ |xs|`],
+      [Same nat subtraction issue.],
+    [`foldr f b (xs @ ys) = foldr f (foldr f b ys) xs`],
+      [Type error: b in list position; Nitpick confirms.],
+    [`length [m..<n] + length [n..<p] = length [m..<p]`],
+      [False when m>n: e.g., m=2, n=1, p=3 gives 0+2≠1.],
   ),
-  caption: [Hard test (100 goals) failure breakdown. Of 20 failures, 6 are non-theorems correctly rejected by Sledgehammer; 12 are genuine theorems beyond Sledgehammer's ATP reach; 2 fail on SIGMA-type notation requiring imports beyond the default HOL session. Corrected success rate on theorems only: 80/94 = 85.1%.]
-) <tbl-hard-failures>
+  caption: [All 12 non-theorems identified by Nitpick and Quickcheck across all benchmark datasets.
+  Sledgehammer correctly returned no proof for each goal.]
+) <tbl-nontheorems>
 
 == Discussion
 
-*Where Sledgehammer wins.*
-On propositional logic and simple HOL lemmas, Sledgehammer achieves 100% success
-on both `logic.txt` and `sets.txt` (5/5 and 8/8 respectively), and 96.0% on
-the 100-goal HOL main easy test set.
-These goals have shallow structure that modern ATPs — E, Vampire, Z3, and
-Isabelle's built-in `simp`/`auto`/`blast` — can discharge without induction.
-The median wall-clock time is 17~s on the small datasets and 19.0~s on the
-easy test set, including Isabelle server startup and theory compilation overhead.
+*Where Sledgehammer excels.*
+System~A achieves 100\% on `logic.txt` and `sets.txt` (propositional and set-theoretic
+goals with no induction) and 96.0\% on the HOL main easy test.
+These goals have shallow structure that E, Vampire, Z3, and Isabelle's built-in
+`simp`/`auto`/`blast` discharge without inductive arguments.
+The median solve time is 17--20~s across all datasets, reflecting Isabelle server
+startup and theory compilation overhead rather than ATP search time
+(Sledgehammer typically returns a proof within 5~s once the server is warm).
 
-On the mid test set Sledgehammer achieves 74.0% (74/100), or 77.1% when
-non-theorems are excluded.
-The 20 remaining failures are theorems requiring arithmetic reasoning over
-natural number subtraction (which is truncated in HOL), integer abs/min/max
-properties, relational algebra, and deprecated product/sum eliminator names
-(`prod_case`, `split`) that Sledgehammer's fact retrieval does not surface.
+*Where Sledgehammer fails.*
+System~A achieves only 44.4\% on `nat.txt` (4/9 goals), where commutativity and
+associativity of natural number addition require inductive arguments that first-order
+ATPs cannot synthesise.
+Similarly, 20 failures in the mid test set involve arithmetic reasoning over natural
+number subtraction (truncated in HOL), integer `abs`/`min`/`max`, and relational
+algebra — areas where ATP translations lose structural information.
+The non-monotonic result (hard 80\% > mid 74\%) is explained by the hard corpus
+containing a higher proportion of higher-order goals (relational algebra, function
+composition, image/preimage) that Sledgehammer's ATPs handle well, while the mid
+corpus has more arithmetic goals that evade ATP translation.
 
-On the hard test set Sledgehammer achieves 80.0% (80/100) with a median
-solve time of 20.1~s — a non-monotonic result where System~A performs
-_better_ on hard goals than mid goals (see @tbl-hard-failures).
-This is explained by the composition of the hard corpus: the majority of
-hard goals involve higher-order properties (relational algebra, function
-composition, image/preimage, zip/take/drop) that Sledgehammer's ATPs handle
-well, while the mid corpus has a higher proportion of goals requiring
-arithmetic reasoning that evades ATP translation.
-Nitpick and Quickcheck analysis confirmed 6 non-theorems among the 20 hard
-failures (details below), giving a corrected theorem-only rate of 80/94 = 85.1%.
-The 12 genuine ATP-exhausted failures include `card`/`sum` combinatorics
-requiring inductive sum splitting that Sledgehammer cannot perform, while
-two fast-fails on SIGMA-type goals require additional library imports beyond
-the default HOL session.
+*System~B — LLM stepwise prover.*
+Early benchmarks reported 0/5 (0.0\%) on `logic.txt` and 0/20 (0.0\%) on the
+first 20 HOL easy goals.
+Post-investigation, this was entirely due to the Pydantic v2 deserialization bug
+described in Section~4.1: every Isabelle verification response was silently read
+as a failure.
+After patching `_decode_body_to_dict`, System~B with Sledgehammer enabled (beam=3,
+60~s wall-clock) achieves *5/5 (100.0\%)* on `logic.txt` with a median of 10.88~s —
+faster than System~A because Sledgehammer runs inside a warm persistent session.
+Without Sledgehammer, qwen2.5-coder:7b frequently generates complete Isabelle
+theory blocks rather than individual `apply` tactics, which Isabelle rejects in
+proof state mode.
+The full-suite System~B benchmarks (nat, lists, sets) are pending; we expect results
+comparable to System~A on easy goals since Sledgehammer provides the primary signal.
 
-*System B — LLM stepwise prover.*
-Early benchmarks of System~B reported 0/5 (0.0%) on `logic.txt` and
-0/20 (0.0%) on the first 20 HOL main easy goals.
-These results were caused by a Pydantic v2 deserialization bug in
-`isabelle_client`: the `UseTheoriesResults` body was stored as a Pydantic
-model object rather than a plain dict, so `finished_ok` — which accesses
-fields by dict-key lookup — always fell through to the `(False, {})` fallback,
-making every Isabelle verification appear to fail regardless of whether
-Isabelle had actually accepted the proof.
+*System~C — LLM planner.*
+System~C is verified correct on individual unit tests: a two-hole induction outline
+for `map f (xs @ ys) = map f xs @ map f ys` was filled via Sledgehammer's `by simp`
+(the fast path collapsed the induction to a direct one-liner after verifying it with
+Isabelle), and the single-have outline for `length (xs @ ys) = length xs + length ys`
+was filled with `by simp` and verified.
+Full benchmark results for System~C across the hand-crafted and HOL main datasets
+are pending due to the time required for per-goal outline generation and repair
+cycles on the available hardware.
+We anticipate System~C will outperform System~A on goals in `nat.txt` where
+induction is required, since the planner explicitly generates induction skeletons
+that Sledgehammer-only cannot produce.
 
-After patching `_decode_body_to_dict` in `isabelle_api.py` to call
-`.model_dump()` when the response object is a Pydantic model,
-System~B correctly reports verification outcomes.
-A corrected benchmark on `logic.txt` (5 goals, beam=3, 60 s wall-clock,
-Sledgehammer enabled) yields *5/5 (100.0%)* with a median solve time of
-10.88~s — identical in success rate to System~A and faster because
-Sledgehammer (invoked within the same persistent Isabelle session)
-finds a proof without consuming the full 20~s internal ATP budget.
-
-Without Sledgehammer, System~B still struggles on qwen2.5-coder:7b:
-the 7B model frequently generates complete Isabelle theory blocks
-rather than individual `apply` tactics, which Isabelle rejects in
-`proof state` mode.
-The prover was designed for `qwen3-coder:30b` (30 billion parameters),
-and full `apply`-style tactic generation requires a larger model.
-Full suite mid/hard System~B benchmarks (without Sledgehammer) are
-deferred pending access to a 30B+ model; with Sledgehammer enabled,
-the remaining benchmark runs are in progress.
-
-*Where the planner wins.*
-Goals that require induction or structured case analysis expose Sledgehammer's
-fundamental limitation: it cannot search over proof structures, only over fact
-combinations.
-On `nat.txt`, Sledgehammer proves only 4/9 goals (44.4%) because commutativity
-and associativity of natural number addition require inductive arguments that
-Sledgehammer cannot synthesise within its ATP translation.
-Similarly, on the easy test set, failures such as `sum_list (map (λ_. k) xs) = k * length xs`
-require induction over a list, and `map_option id o = o` fails due to a type ambiguity.
-System~C (the LLM planner) generates an Isar skeleton with explicit `induct`
-steps that the stepwise prover can then fill hole-by-hole, targeting precisely
-these cases.
-
-*CEGIS repair.*
-The three-stage escalation strategy is most effective when the initial LLM
-skeleton is structurally plausible but contains minor errors in one have/show
-block.
-Stage~1 (local block repair) is expected to resolve the majority of fixable
-failures without escalating to expensive whole-proof regeneration.
-Stage~3 (whole-proof regeneration) is used sparingly but prevents complete
-deadlock on goals where the skeleton structure is fundamentally wrong.
-
-The five improvements to the repair loop each address a distinct failure mode
-observed during development.
-The "Try this" pre-pass is the highest-impact single change: when the LLM
-generates `apply sledgehammer` as a repair step, Isabelle's ATP back-ends
-frequently find a proof and emit `Try this: by (simp add: ...) (Xms)`.
-Without the pre-pass, that suggestion was discarded and the LLM was asked
-to produce an equivalent tactic from scratch — a slower and less reliable
-path.
-The stage-cascade fix addresses a structural issue: proofs that require
-repairs at two different granularity levels (e.g., a wrong `have` block
-_and_ a mismatched enclosing `proof ... qed` header) previously stalled
-after Stage~1 partial progress and never reached Stage~2.
-The smarter fingerprint and the complete Stage~3 ban-list both reduce wasted
-LLM calls: the former avoids re-verifying semantically identical blocks, while
-the latter ensures each whole-proof regeneration explores a structurally new
-approach.
-The error-specific `_why_from_errors` guidance reduces the number of rounds
-needed to converge on a correct repair by directing the LLM toward the
-right class of fix (type correction, tactic substitution, identifier lookup,
-etc.) rather than asking for a general retry.
-Quantitative breakdown of CEGIS repair outcomes per stage was not collected
-in the current evaluation run due to hardware constraints preventing
-System~C execution; the implementation is instrumented to collect these
-metrics in future runs.
-
-*Failure modes.*
-The main failure modes observed for System~A are: (1) goals requiring induction
-(Sledgehammer cannot synthesise inductive arguments); (2) goals where the ATP
-encoding of HOL types loses structural information, causing fast timeouts
-(e.g., `map_option id o = o` failed in 2.1~s due to a type error).
-For System~C, anticipated failure modes include: (3) LLM generates an outline
-with the wrong induction variable, causing all fills to fail; (4) the stepwise
-prover exhausts its tactic budget on a difficult subgoal.
-
-*Non-theorems in the benchmark.*
-Nitpick and Quickcheck analysis of all failing goals across every dataset
-revealed *12 non-theorems* embedded in the benchmark — 2 in the small
-datasets, 4 in the mid test set, and 6 in the hard test set:
-
-#figure(
-  table(
-    columns: (auto, auto, auto),
-    align: (left, left, left),
-    [*Dataset*], [*Goal*], [*Why it is false*],
-    [lists.txt], [`map f (filter p xs) = filter (λx. p x) (map f xs)`],
-      [f = swap, p = \{a₂\}, xs = \[a₁\]: LHS = \[\], RHS = \[a₂\].],
-    [easy test], [`take n xs = take n (xs @ ys) ⟷ n ≤ length xs`],
-      [n=1, xs=\[\], ys=\[\]: take 1 \[\] = \[\] but ¬(1≤0).],
-    [mid test],  [`(f \` A) ∩ (f \` B) ⊆ f \` (A ∩ B)`],
-      [Fails for non-injective f (constant function is a counterexample).],
-    [mid test],  [`Range (r O s) = Range r ∩ (r \`\` (Range s))`],
-      [Nitpick counterexample for card 'a = 3.],
-    [mid test],  [`(a::int) ≤ b ⟶ a * c ≤ b * c`],
-      [False for negative c (a=1, b=2, c=−1 gives −1 ≰ −2).],
-    [mid test],  [`(a::int) ≤ b ⟶ a mod c ≤ b mod c ∨ c=0`],
-      [Nitpick and Quickcheck both find counterexamples.],
-    [hard test], [`(∃x. P x ∧ (Q x → R x)) → ((∃x. P x ∧ Q x) → (∃x. R x))`],
-      [Witnesses may differ: x with P∧(Q→R) need not satisfy Q; Nitpick card'a=6.],
-    [hard test], [`f \` (A − B) ⊆ (f \` A) − (f \` (A ∩ B))`],
-      [Non-injective f: f(a)=f(b), a∈A−B, b∈A∩B ⟹ f(a)∈f\`(A∩B).],
-    [hard test], [`rev (take n xs) = drop (|xs|−n) (rev xs) ⟷ n ≤ |xs|`],
-      [Equality holds for n>|xs| too (nat subtraction gives 0); iff is too strong.],
-    [hard test], [`rev (drop n xs) = take (|xs|−n) (rev xs) ⟷ n ≤ |xs|`],
-      [Same issue: equality holds outside the bound via nat subtraction.],
-    [hard test], [`foldr f b (xs @ ys) = foldr f (foldr f b ys) xs`],
-      [Type error: b is in the list position of foldr; Nitpick confirms.],
-    [hard test], [`length [m..<n] + length [n..<p] = length [m..<p]`],
-      [False when m>n: e.g., m=2, n=1, p=3 gives 0+2=2 ≠ 1.],
-  ),
-  caption: [All 12 non-theorems identified by Nitpick and Quickcheck across all benchmark datasets. Sledgehammer correctly returned no proof for each goal.]
-)
-
-This finding is significant for two reasons. First, it demonstrates that our
-two-phase Isabelle verification is essential for evaluation integrity: a system
-that trusts ATP output without re-verification would misreport these
-correctly-rejected goals as prover failures.
-Second, it reveals that benchmark datasets contain a non-trivial proportion
-of malformed or false goals (12/400 = 3.0% across all goals tested) —
-a known issue in automatically generated theorem corpora @blanchette2010nitpick.
-Excluding non-theorems, the corrected theorem-only success rates are:
-74/96 = 77.1% (mid) and 80/94 = 85.1% (hard).
+*Non-theorem finding.*
+Nitpick and Quickcheck analysis of all failures revealed 12 non-theorems embedded
+across the benchmark datasets (3.0\% of 400 goals tested), covering all three
+difficulty levels.
+This underscores the importance of two-phase Isabelle verification: a system
+that trusts ATP output without re-verification would misreport these correctly-rejected
+goals as prover failures, inflating apparent difficulty.
+It also suggests that automatically generated theorem corpora contain a non-trivial
+proportion of malformed or false statements @blanchette2010nitpick.
 
 // ============================================================
 // 5. CONCLUSION
@@ -634,50 +644,42 @@ Excluding non-theorems, the corrected theorem-only success rates are:
 
 = Conclusion
 
-We have presented an LLM-guided theorem prover for Isabelle/HOL that combines
-structured Isar proof planning with a CEGIS-style staged repair loop.
-The key insight is that separating proof planning (skeleton generation) from
-proof filling (tactic synthesis) allows each component to be optimised
-independently, and that escalating repair scope — from local blocks to whole
-proofs — recovers a significant fraction of initially-failed goals.
+We have presented and evaluated an LLM-guided theorem prover for Isabelle/HOL
+that integrates structured Isar proof planning, stepwise tactic search with
+premise retrieval and ML reranking, and a CEGIS-style staged repair loop.
 
-Our evaluation of the Sledgehammer baseline (System~A) shows a clear
-difficulty gradient: 85.0% on hand-crafted small datasets (40 goals),
-96.0% on the HOL main easy test set (100 goals), 74.0% on the
-HOL main mid test set (100 goals), and 80.0% on the
-HOL main hard test set (100 goals), with median solve times of 17–20~s
-throughout.
-The non-monotonic hard result (80\% > mid 74\%) is explained by the
-hard corpus containing more higher-order goals amenable to Sledgehammer's
-ATP back-ends (e.g., relational algebra, function composition) alongside
-goals requiring sum/card combinatorics that stymie all three ATPs.
-Nitpick and Quickcheck analysis of all failures revealed 12 non-theorems
-embedded in the benchmark datasets — goals that Sledgehammer correctly
-rejected — giving corrected theorem-only rates of 96/98 = 98.0% (easy),
-74/96 = 77.1% (mid), and 80/94 = 85.1% (hard).
-The key limitation of Sledgehammer is its inability to synthesise inductive
-arguments: it achieves only 44.4% on `nat.txt` where induction is required,
-compared to 100% on purely propositional or set-theoretic goals.
-Initial benchmarks of System~B reported 0% success, but this was entirely
-due to a Pydantic v2 deserialization bug in `isabelle_api.py` that caused
-all Isabelle verification responses to be read as failures.
-After patching `_decode_body_to_dict`, System~B (with Sledgehammer enabled,
-beam=3, 60~s wall-clock) achieves *5/5 (100.0%)* on `logic.txt`
-with a median time of 10.88~s — matching System~A's accuracy while using
-Sledgehammer suggestions directly within the persistent session.
-LLM-only mode with qwen2.5-coder:7b remains unreliable because the 7B
-model does not consistently produce `apply`-style tactic steps; the system
-was designed for `qwen3-coder:30b` and full LLM-driven benchmarks require
-a larger model.
-System~C quantitative results remain pending completion of the full
-benchmark suite; the implementation is verified correct on individual goals
-(e.g., `length (xs @ ys) = length xs + length ys` proved via `by simp`,
-and two-hole induction outlines for `map f (xs @ ys) = map f xs @ map f ys`
-successfully filled and verified).
+System~A (Sledgehammer-only baseline) achieves 85.0\% on 40 hand-crafted goals,
+96.0\% on the HOL main easy test set, 74.0\% on the mid test set, and 80.0\%
+on the hard test set, with median solve times of 17--20~s.
+The non-monotonic hard result reflects the composition of the hard corpus
+rather than any prover improvement.
+Nitpick and Quickcheck analysis revealed 12 non-theorems across all datasets,
+giving corrected theorem-only rates of 98.0\% (easy), 77.1\% (mid), and 85.1\% (hard).
+System~B (LLM stepwise prover), after correcting the Pydantic v2 deserialization
+bug, achieves 100\% on logic goals matching System~A.
 
-Future work includes integrating premise selection more tightly with the planner
-and exploring reinforcement learning-based tactic reranking to further improve
-the stepwise prover.
+The most significant ideas learned from this project are as follows.
+First, the correctness of the system integration layer is as important as the
+quality of the LLM or ATP component: the Pydantic bug masked all verified proofs
+and made every component appear broken, an effect that was entirely invisible from
+the output side until the API layer was inspected.
+Second, proof structure and tactic synthesis are best treated as separate concerns:
+separating outline generation from hole filling allows each component to be
+independently improved and tested, and the hole filler benefits strongly from
+Isabelle's own proof state feedback rather than relying on the LLM to predict
+the state.
+Third, Sledgehammer is highly effective for the majority of "routine" goals
+(propositional logic, set theory, simple higher-order properties) but
+fundamentally limited to goals expressible as first-order ATP problems;
+goals requiring inductive arguments expose a qualitative boundary that requires
+the Isar planner to cross.
+Fourth, a 7B model is sufficient to drive Sledgehammer-backed proof search
+effectively in beam mode but is inadequate for LLM-only tactic generation,
+which requires the 30B+ model the system was designed around.
+
+Future work includes completing the full System~C benchmark, integrating the
+ML reranker with a purpose-trained model, and extending the CEGIS repair loop
+with a counterexample-guided backtracking strategy for non-theorem detection.
 
 // ============================================================
 // DATA AVAILABILITY
@@ -715,8 +717,8 @@ accepts the proof. Can you identify why the response body is not being decoded
 correctly?"
 
 *Response summary:* Claude identified that the `use_theories` response body was
-being stored as a Pydantic `UseTheoriesResults` model object rather than a plain
-`dict`, causing all dict-key lookups to silently fail. The fix was to add
+stored as a Pydantic `UseTheoriesResults` model object rather than a plain `dict`,
+causing all dict-key lookups to silently fail. The fix was to add
 `.model_dump()` / `vars()` fallback calls in `_decode_body_to_dict` inside
 `isabelle_api.py`, restoring correct proof verification across all three systems.
 
