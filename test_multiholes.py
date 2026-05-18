@@ -91,8 +91,14 @@ spans2 = find_sorry_spans(outline2)
 print(f"Found {len(spans2)} sorry hole(s)")
 
 full2 = outline2
-for i, span in enumerate(find_sorry_spans(full2)):
-    print(f"\n--- Filling hole {i+1} ---")
+i = 0
+while True:
+    spans2 = find_sorry_spans(full2)
+    if not spans2:
+        break
+    span = spans2[0]
+    i += 1
+    print(f"\n--- Filling hole {i} ---")
     new_text, ok, script = _fill_one_hole(
         isa, session, full2, span,
         goal_text="length (xs @ ys) = length xs + length ys",
@@ -103,7 +109,10 @@ for i, span in enumerate(find_sorry_spans(full2)):
     print(f"  ok={ok}, script={script!r}")
     if ok:
         full2 = new_text
-        print(f"  ✅ Hole {i+1} filled!")
+        print(f"  ✅ Hole {i} filled!")
+    else:
+        print(f"  ❌ Hole {i} not filled.")
+        break
 
 print("\nFinal proof text:")
 print(full2)
