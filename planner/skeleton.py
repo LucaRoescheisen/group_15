@@ -917,11 +917,23 @@ def propose_isar_skeleton_diverse_best(
         rec_hints += _hints_from_hintlex(goal, hintlex, top=hintlex_top)
     rec_hints = list(dict.fromkeys(rec_hints))[:12]  # stable de-dup + cap
 
+    # Always include a minimal direct-proof fallback so Sledgehammer has a
+    # chance to close the goal in one step even when LLM outlines are wrong.
+    # It scores (1 subgoal, 0 penalty) — ties with any other 1-subgoal outline
+    # but wins by index since it is prepended.
+    minimal_sk_text = f'lemma "{goal}"\nproof -\n  sorry\nqed\n'
+    minimal_sk = Skeleton(text=minimal_sk_text, holes=find_sorry_spans(minimal_sk_text))
+
     # Outline candidates (LLM) + optional library templates
     cands = propose_isar_skeletons(goal, model=model, temps=temps, k=k,
                                    force_outline=force_outline, hints=rec_hints)
     if lib_templates:
         cands = _lib_templates_for_goal(goal) + cands
+
+    # Prepend the minimal fallback so it always participates in scoring.
+    # The diverse LLM outlines follow; if any score strictly better (fewer
+    # subgoals / lower penalty) they will win.
+    cands = [minimal_sk] + [c for c in cands if c.text.strip() != minimal_sk_text.strip()]
 
     # Load optional priors/rules
     rules = _load_priors(priors_path)
