@@ -2,24 +2,39 @@ import os, sys, json
 os.environ['ISABELLE_INST_DIR'] = r'C:\Program Files\Isabelle2025-2'
 os.environ['PYTHONUTF8'] = '1'
 
-from prover.isabelle_api import start_isabelle_server, get_isabelle_client, build_theory, run_theory, session_start
+from prover.isabelle_api import start_isabelle_server, get_isabelle_client, build_theory, run_theory, session_start, finished_ok, _decode_body_to_dict, _get_field
 from prover.config import ISABELLE_SESSION
-from planner.goals import _build_ml_prolog, _inject_var_extraction, _extract_print_state_from_responses, _print_state_before_hole
 import time
 
 server_info, proc = start_isabelle_server(name='test')
 isa = get_isabelle_client(server_info)
 session = session_start(isa, session=ISABELLE_SESSION)
-print(f"Session: {session!r}")
 time.sleep(2)
 
-full_text = 'lemma "length (xs @ ys) = length xs + length ys"\nproof -\n  have f1: "length (xs @ ys) ≤ length xs + length ys"\n    sorry\n  have f2: "length xs + length ys ≤ length (xs @ ys)"\n    sorry\n  show ?thesis\n    sorry\nqed\n'
+# Simple proof that should succeed
+thy = build_theory(['lemma "length (xs @ ys) = length xs + length ys"', 'by simp'], add_print_state=False, end_with=None)
+resps = run_theory(isa, session, thy)
+print(f"Got {len(resps)} responses")
+ok, d = finished_ok(resps)
+print(f"finished_ok: ok={ok}, d={d}")
 
-sorry_pos = full_text.find('sorry')
+# Examine the FINISHED response body
+for r in resps:
+    rtype = str(getattr(r, 'response_type', ''))
+    if 'FINISHED' in rtype.upper():
+        body = _get_field(r, ("response_body", "body", "message", "payload"))
+        print(f"Body type: {type(body).__name__}")
+        print(f"Body ok attr: {getattr(body, 'ok', 'N/A')}")
 
-# Test _print_state_before_hole directly
-state = _print_state_before_hole(isa, session, full_text, (sorry_pos, sorry_pos+5), trace=True)
-print(f"\nState block length: {len(state)}")
-print(f"State block:\n{state[:500]}")
+        # Test json.loads on body
+        try:
+            result = json.loads(body)
+            print(f"json.loads succeeded: {type(result)}")
+        except Exception as e:
+            print(f"json.loads failed: {e}")
+
+        # Test _decode_body_to_dict
+        decoded = _decode_body_to_dict(body)
+        print(f"_decode_body_to_dict: {type(decoded)} = {decoded}")
 
 proc.kill()
