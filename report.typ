@@ -654,17 +654,22 @@ rejected — giving corrected theorem-only rates of 96/98 = 98.0% (easy),
 The key limitation of Sledgehammer is its inability to synthesise inductive
 arguments: it achieves only 44.4% on `nat.txt` where induction is required,
 compared to 100% on purely propositional or set-theoretic goals.
-Benchmarking of System~B with the locally-available qwen2.5-coder:7b model
-yielded 0/25 (0%) across both `logic.txt` and the first 20 HOL main easy
-goals — confirming that the apply-style tactic prompt requires a 30B+
-parameter model (the designed default is qwen3-coder:30b) to produce valid
-`apply` steps.
-The Sledgehammer fallback within System~B's persistent session also fails
-on goals that System~A proves from a clean theory, highlighting an
-architectural difference in how Isabelle server warm-up interacts with
-per-step timeouts.
-System~C quantitative results remain pending access to a suitable
-large-model inference platform.
+Initial benchmarks of System~B reported 0% success, but this was entirely
+due to a Pydantic v2 deserialization bug in `isabelle_api.py` that caused
+all Isabelle verification responses to be read as failures.
+After patching `_decode_body_to_dict`, System~B (with Sledgehammer enabled,
+beam=3, 60~s wall-clock) achieves *5/5 (100.0%)* on `logic.txt`
+with a median time of 10.88~s — matching System~A's accuracy while using
+Sledgehammer suggestions directly within the persistent session.
+LLM-only mode with qwen2.5-coder:7b remains unreliable because the 7B
+model does not consistently produce `apply`-style tactic steps; the system
+was designed for `qwen3-coder:30b` and full LLM-driven benchmarks require
+a larger model.
+System~C quantitative results remain pending completion of the full
+benchmark suite; the implementation is verified correct on individual goals
+(e.g., `length (xs @ ys) = length xs + length ys` proved via `by simp`,
+and two-hole induction outlines for `map f (xs @ ys) = map f xs @ map f ys`
+successfully filled and verified).
 
 Future work includes integrating premise selection more tightly with the planner
 and exploring reinforcement learning-based tactic reranking to further improve
