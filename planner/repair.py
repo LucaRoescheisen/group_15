@@ -145,6 +145,61 @@ def _why_from_errors(errors: List[str], block_type: str) -> str:
     return f"Previous {block_type}-block attempt did not solve the goal; try a structurally different approach (different induction variable, different lemmas, or a calculational proof)."
 
 
+def _extract_try_this_suggestions(err_texts: List[str]) -> List[str]:
+    """Parse every 'Try this: <tactic>' line from Isabelle error/output messages.
+
+    When sledgehammer or solve_direct finds a proof, Isabelle prints a line like:
+        Try this: by (simp add: append_assoc) (0.5ms)
+    Extracting and trying these directly is faster and more reliable than
+    asking the LLM to generate an equivalent tactic from scratch.
+    """
+    suggestions: List[str] = []
+    seen: Set[str] = set()
+    for err in err_texts:
+        for m in _TRY_THIS_RE.finditer(err):
+            tactic = m.group(1).strip()
+            # Strip any trailing timing annotation the regex may have missed
+            tactic = re.sub(r"\s*\(\d+(?:\.\d+)?(?:ms|s)\)\s*$", "", tactic).strip()
+            if tactic and tactic not in seen:
+                seen.add(tactic)
+                suggestions.append(tactic)
+    return suggestions
+
+
+def _apply_try_this_to_block(
+    suggestion: str,
+    block_lines: List[str],
+    lines: List[str],
+    start: int,
+    end: int,
+) -> Optional[str]:
+    """Substitute a 'Try this' tactic into the block, replacing the last tactic line.
+
+    The suggestion (e.g. 'simp add: foo') is normalised to 'by (simp add: foo)'
+    and replaces the last 'by ...' or 'apply ...' line in the block — the line
+    most likely to be the one that failed.  Returns the full patched text, or
+    None if no tactic line was found to replace.
+    """
+    if not block_lines:
+        return None
+    # Normalise to a `by X` form
+    if suggestion.startswith("by ") or suggestion.startswith("apply "):
+        replacement_by = suggestion
+    else:
+        # Wrap multi-word tactics in parens for safety
+        replacement_by = (
+            "by (" + suggestion + ")" if " " in suggestion else "by " + suggestion
+        )
+    _tac_line_re = re.compile(r"^\s*(?:by\b|apply\b)")
+    for i in range(len(block_lines) - 1, -1, -1):
+        if _tac_line_re.match(block_lines[i]):
+            indent = block_lines[i][: len(block_lines[i]) - len(block_lines[i].lstrip())]
+            new_block_lines = block_lines[:i] + [indent + replacement_by] + block_lines[i + 1:]
+            patched_lines = lines[:start] + new_block_lines + lines[end:]
+            return "\n".join(patched_lines)
+    return None
+
+
 def _is_tactic_line(s: str) -> bool:
     return bool(_TACTIC_LINE.search(s)) and not bool(_STRUCTURAL_LINE.match(s))
 
