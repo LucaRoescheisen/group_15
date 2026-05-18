@@ -405,8 +405,9 @@ The three systems are invoked as:
     [HOL main easy test],   [19.0], [—], [—],
     [HOL main mid test],    [17.4], [—], [—],
     [HOL main hard test],   [20.1], [—], [—],
+    [logic.txt (smoke)],    [~17],  [10.88], [—],
   ),
-  caption: [Median wall-clock solve time per goal (seconds). System A times include Isabelle server startup and theory compilation overhead. Systems B and C were not benchmarked.]
+  caption: [Median wall-clock solve time per goal (seconds). System A times include Isabelle server startup and theory compilation overhead. System B logic median includes Sledgehammer query time and one LLM call per goal. System C not yet benchmarked.]
 )
 
 #figure(
