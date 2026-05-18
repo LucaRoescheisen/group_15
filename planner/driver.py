@@ -75,10 +75,13 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
     #     #     print(f"[fill] Original goal: {orig_goal}")
     #     print(f"[fill] Effective goal: {eff_goal}")
     
+    # Cap sledge_timeout at half the hole budget so there is always time left
+    # for the finisher-verification loop after sledgehammer returns candidates.
+    _sledge_t = max(5, min(10, per_hole_timeout // 3))
     res = prove_goal(
         isabelle, session, eff_goal, model_name_or_ensemble=model,
         beam_w=3, max_depth=6, hint_lemmas=6, timeout=per_hole_timeout,
-        models=None, save_dir=None, use_sledge=True, sledge_timeout=10,
+        models=None, save_dir=None, use_sledge=True, sledge_timeout=_sledge_t,
         sledge_every=1, trace=trace, use_color=False, use_qc=False,
         qc_timeout=2, qc_every=1, use_np=False, np_timeout=5, np_every=2,
         facts_limit=8, do_minimize=False, minimize_timeout=8,
