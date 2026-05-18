@@ -200,6 +200,90 @@ def _apply_try_this_to_block(
     return None
 
 
+def _extract_induction_hyps(state_block: str) -> List[str]:
+    """Extract induction hypothesis lines from an Isabelle proof state block.
+
+    Matches patterns like:
+        Cons.IH : rev (rev xs) = xs
+        IH      : P n
+    These facts are already in scope and can be used directly in 'using' clauses.
+    """
+    lines = (state_block or "").splitlines()
+    ihs: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if re.search(r"\b\w+\.IH\b", stripped):
+            ihs.append(stripped)
+        elif re.match(r"IH\s*:", stripped):
+            ihs.append(stripped)
+    return ihs
+
+
+def _proactive_sledgehammer_suggestions(
+    isabelle, session: str, full_text: str,
+    block_start_line: int, block_end_line: int,
+    *, timeout_s: int = 12,
+) -> List[str]:
+    """Run Sledgehammer on the first sorry inside the block and return 'Try this:' suggestions.
+
+    Replaces the first bare 'sorry' in lines [block_start_line, block_end_line) with
+    'by sledgehammer', submits the theory to Isabelle, and collects any ATP-found
+    suggestions.  This is a deterministic pre-pass: if Sledgehammer solves the
+    subgoal we save the entire LLM budget for that hole.
+    """
+    lines = full_text.splitlines()
+    sorry_idx: Optional[int] = None
+    for i in range(block_start_line, min(block_end_line, len(lines))):
+        if lines[i].strip() == "sorry":
+            sorry_idx = i
+            break
+    if sorry_idx is None:
+        return []
+    indent = lines[sorry_idx][: len(lines[sorry_idx]) - len(lines[sorry_idx].lstrip())]
+    modified = "\n".join(
+        lines[:sorry_idx] + [f"{indent}by sledgehammer"] + lines[sorry_idx + 1:]
+    )
+    try:
+        _, errs = _quick_state_and_errors(isabelle, session, modified, timeout_s=timeout_s)
+        return _extract_try_this_suggestions(errs)
+    except Exception:
+        return []
+
+
+def _maybe_fix_arbitrary(full_text: str, errors: List[str]) -> Optional[str]:
+    """Detect 'locally fixed variable X' Isabelle errors and patch the induction.
+
+    When a proof uses 'proof (induction xs)' but the goal involves a second
+    variable (e.g. ys) that was fixed by a surrounding 'fix' or outer context,
+    Isabelle complains 'locally fixed variable ys'.  The fix is to add
+    'arbitrary: ys' to the induction method.
+
+    Returns the patched text if a fix was applied, else None.
+    """
+    joined = " ".join(errors)
+    m = re.search(r"locally fixed variable[s]?\s+(\w+)", joined, re.IGNORECASE)
+    if not m:
+        return None
+    var = m.group(1)
+
+    # Matches: proof (induction <vars>) with optional existing arbitrary clause
+    induct_re = re.compile(
+        r"(proof\s*\(\s*induction(?:\s+[\w']+)+)((?:\s+arbitrary\s*:\s*[\w'\s]+)?)\s*\)"
+    )
+
+    def _add_var(match: re.Match) -> str:
+        head = match.group(1)
+        arb = (match.group(2) or "").strip()
+        if arb:
+            if re.search(r"\b" + re.escape(var) + r"\b", arb):
+                return match.group(0)  # already present
+            return f"{head} {arb} {var})"
+        return f"{head} arbitrary: {var})"
+
+    fixed = induct_re.sub(_add_var, full_text, count=1)
+    return fixed if fixed != full_text else None
+
+
 def _is_tactic_line(s: str) -> bool:
     return bool(_TACTIC_LINE.search(s)) and not bool(_STRUCTURAL_LINE.match(s))
 
