@@ -88,26 +88,23 @@ def _is_effective_block(text: str) -> bool:
     return bool(_sanitize_llm_block(text or "").strip())
 
 def _fingerprint_block(text: str) -> str:
-    “””Canonicalize a block to detect duplicates across rounds.
-
-    Normalises:
-    - Whitespace collapse
-    - Quote/backtick variants
-    - ATP tactic synonyms: by auto/blast/fastforce/clarsimp -> by ATP
-    - simp add: lemma lists sorted so ordering differences don’t bypass dedup
-    - Generated fact labels f1/f2/h1/g1 -> fN so label renames look identical
-    “””
+    # Canonicalize a block to detect duplicates across repair rounds.
+    # Normalises: whitespace, quote variants, ATP synonyms,
+    # simp add: lemma ordering, and generated fact labels (f1/f2 -> fN).
     if not text:
         return “”
     t = re.sub(r”\s+”, “ “, text.strip())
-    t = t.replace(“`”, “”).replace(““”, ‘”’).replace(“””, ‘”’).replace(“‘”, “’”)
-    # Treat common ATP synonyms as identical
+    # Normalize backticks and curly/smart quotes to plain ASCII
+    t = t.replace(“`”, “”)
+    t = t.replace(““”, ‘”’).replace(“””, ‘”’)
+    t = t.replace(“‘”, “’”).replace(“’”, “’”)
+    # Treat common ATP synonyms as identical so “by auto” == “by blast”
     t = re.sub(r”\bby\s+(auto|blast|fastforce|clarsimp)\b”, “by ATP”, t)
-    # Sort simp add: lemma lists so “simp add: a b” == “simp add: b a”
+    # Sort simp add: lemma lists so ordering differences don’t bypass dedup
     def _sort_simp(m: re.Match) -> str:
         return “simp add: “ + “ “.join(sorted(m.group(1).split()))
     t = re.sub(r”\bsimp\s+add:\s+([^\n\]()]+)”, _sort_simp, t)
-    # Normalise generated fact labels so renaming doesn’t bypass dedup
+    # Normalise generated fact labels so f1/f2/h3 renames look identical
     t = re.sub(r”\b[fhg]\d+\b”, “fN”, t)
     return t
 
