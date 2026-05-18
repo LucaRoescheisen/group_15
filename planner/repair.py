@@ -311,26 +311,38 @@ def _extract_proof_context(full_text: str, block_start_line: int) -> str:
     return "\n".join(context_lines).strip()
 
 # ========== LLM Generation ==========
-def _generate_simple(prompt: str, model: Optional[str] = None, *, timeout_s: Optional[int] = None) -> str:
+def _generate_simple(
+    prompt: str,
+    model: Optional[str] = None,
+    *,
+    timeout_s: Optional[int] = None,
+    temperature: Optional[float] = None,
+) -> str:
     m = model or DEFAULT_MODEL
     timeout = timeout_s or OLLAMA_TIMEOUT_S
-    
     if m.startswith("hf:"):
-        return _hf_generate(prompt, m[3:], timeout)
+        return _hf_generate(prompt, m[3:], timeout, temperature=temperature)
     elif m.startswith("gemini:"):
-        return _gemini_generate(prompt, m[7:], timeout)
+        return _gemini_generate(prompt, m[7:], timeout, temperature=temperature)
     elif m.startswith("ollama:"):
         m = m[7:]
-    return _ollama_generate(prompt, m, timeout)
+    return _ollama_generate(prompt, m, timeout, temperature=temperature)
 
-def _ollama_generate(prompt: str, model: str, timeout_s: int) -> str:
-    payload = {"model": model, "prompt": prompt, "options": {"temperature": OLLAMA_TEMP, "top_p": OLLAMA_TOP_P, "num_predict": OLLAMA_NUM_PREDICT}, "stream": False}
+def _ollama_generate(
+    prompt: str, model: str, timeout_s: int, *, temperature: Optional[float] = None
+) -> str:
+    temp_val = temperature if temperature is not None else OLLAMA_TEMP
+    payload = {
+        "model": model, "prompt": prompt,
+        "options": {"temperature": temp_val, "top_p": OLLAMA_TOP_P, "num_predict": OLLAMA_NUM_PREDICT},
+        "stream": False,
+    }
     timeout = (10.0, max(30.0, float(timeout_s)))
     resp = _SESSION.post(f"{OLLAMA_HOST.rstrip('/')}/api/generate", json=payload, timeout=timeout)
     resp.raise_for_status()
     return _sanitize_llm_block(resp.json().get("response", "").strip())
 
-def _hf_generate(prompt: str, model_id: str, timeout_s: int) -> str:
+def _hf_generate(prompt: str, model_id: str, timeout_s: int, *, temperature: Optional[float] = None) -> str:
     token = os.getenv("HUGGINGFACE_API_TOKEN")
     if not token:
         raise RuntimeError("HUGGINGFACE_API_TOKEN is not set")
