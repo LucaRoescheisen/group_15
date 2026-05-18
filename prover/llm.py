@@ -119,6 +119,55 @@ def _gemini_cli_generate(system_prompt: str, user_prompt: str, model: str) -> st
         return f"__ERROR__ {e}"
 
 
+def _gemini_rest_generate(system_prompt: str, user_prompt: str, model_id: str) -> str:
+    """
+    Calls the Gemini REST API directly.  Requires GEMINI_API_KEY to be set.
+    Endpoint: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "__ERROR__ GEMINI_API_KEY not set"
+    prompt = _join_prompts(system_prompt, user_prompt)
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": int(OLLAMA_NUM_PREDICT)},
+    }
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + model_id
+        + ":generateContent?key="
+        + api_key
+    )
+    try:
+        _log(f"call: gemini-rest model={model_id}")
+        resp = _SESSION.post(url, json=payload, timeout=int(TIMEOUT_S))
+        resp.raise_for_status()
+        data = resp.json()
+        candidates = data.get("candidates", [])
+        if candidates:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            if parts:
+                return parts[0].get("text", "")
+        return ""
+    except Exception as e:
+        _log(f"error: gemini-rest model={model_id}: {e}")
+        return f"__ERROR__ {e}"
+
+
+def _gemini_generate(system_prompt: str, user_prompt: str, model_id: str) -> str:
+    """
+    Route Gemini calls: REST API when GEMINI_API_KEY is set, CLI otherwise.
+    REST API is preferred because it does not require a separate binary install.
+    """
+    if os.getenv("GEMINI_API_KEY"):
+        result = _gemini_rest_generate(system_prompt, user_prompt, model_id)
+        if not result.startswith("__ERROR__"):
+            return result
+        _log(f"warn: gemini-rest failed, trying CLI: {result}")
+    # Fallback to CLI
+    return _gemini_cli_generate(system_prompt, user_prompt, model_id)
+
+
 # ---------------------------
 # Backend: Hugging Face
 #   - Prefer Inference API if token available
