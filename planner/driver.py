@@ -170,12 +170,22 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
     # Handle finisher
     if fin:
         script_lines = applies + [fin]
-        insert = "\n  " + "\n  ".join(script_lines) + "\n"
         s, e = hole_span
-        new_text = full_text[:s] + insert + full_text[e:]
-        
+        # Preserve the existing indentation before 'sorry' so the replacement is
+        # syntactically valid (e.g. "    sorry" → "    by simp", not "\n  by simp").
+        line_start = full_text.rfind("\n", 0, s) + 1
+        indent = full_text[line_start:s]  # whitespace chars before 'sorry'
+        if applies:
+            body = ("\n" + indent).join(applies) + "\n" + indent + fin
+            new_text = full_text[:line_start] + indent + body + full_text[e:]
+        else:
+            new_text = full_text[:s] + fin + full_text[e:]
+
         if _verify_full_proof(isabelle, session, new_text):
             return new_text, True, "\n".join(script_lines)
+        if trace:
+            print(f"[fill] finisher-unverified: {fin!r}")
+            print(f"[fill] new_text snippet: ...{new_text[max(0,s-40):s+60]}...")
         return full_text, False, "finisher-unverified"
     
     # Handle apply-only  (NEVER mark success for apply-only scripts)
