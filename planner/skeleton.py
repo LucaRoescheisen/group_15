@@ -449,6 +449,79 @@ def _strip_tactics_after_sorry(text: str) -> str:
     return "\n".join(result)
 
 
+def _strip_orphan_sorry(text: str) -> str:
+    """Remove a lone 'sorry' that follows a line ending with an inline 'by …' or 'done'.
+
+    After a completed inline proof (e.g. 'using f1 f2 by linarith') there are
+    no remaining subgoals, so a subsequent bare sorry is invalid and must be dropped.
+    """
+    _INLINE_PROOF_END = re.compile(r"\bby\s+\S|\bdone\b")
+    _SORRY_BARE = re.compile(r"^\s*sorry\s*$")
+
+    lines = text.splitlines()
+    result: List[str] = []
+    after_complete = False
+
+    for line in lines:
+        if after_complete and _SORRY_BARE.match(line):
+            pass  # drop orphan sorry
+        else:
+            if not line.strip():
+                result.append(line)  # blank: keep, keep flag
+            else:
+                after_complete = bool(_INLINE_PROOF_END.search(line))
+                result.append(line)
+
+    return "\n".join(result)
+
+
+def _force_sorry_have_show_bodies(text: str) -> str:
+    """Replace every multi-line have/show proof body with a single sorry.
+
+    Small models often emit a mix of complete proofs and sorrys.  A complete
+    proof that is wrong causes Isabelle to error *before* reaching the sorry,
+    making the sorry unfindable.  Stripping all bodies to sorry lets the
+    filler/CEGIS handle them uniformly.
+
+    Inline one-liners (e.g. 'show ?case by simp') are left untouched.
+    Only multi-line bodies are replaced (i.e. the body starts on the NEXT line).
+    """
+    _HAVE_SHOW_HEAD = re.compile(r"^\s*(?:have|show|obtain)\b")
+    _INLINE_BY = re.compile(r"\s+by\s+\S")   # body already on the head line
+    _STRUCTURAL = re.compile(
+        r"^\s*(?:have|show|obtain|thus|hence|also|moreover|ultimately|"
+        r"finally|case\b|next\b|qed\b|proof\b|lemma\b|theorem\b|corollary\b)\b"
+    )
+    _SORRY_ONLY = re.compile(r"^\s*sorry\s*$")
+
+    lines = text.splitlines()
+    result: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if _HAVE_SHOW_HEAD.match(line) and not _INLINE_BY.search(line):
+            result.append(line)
+            i += 1
+            # collect the body lines until the next structural keyword
+            body: List[str] = []
+            while i < len(lines) and not _STRUCTURAL.match(lines[i]):
+                body.append(lines[i])
+                i += 1
+            # only replace if there's a real body that isn't already just sorry
+            non_blank = [l for l in body if l.strip()]
+            is_pure_sorry = len(non_blank) == 1 and _SORRY_ONLY.match(non_blank[0])
+            if non_blank and not is_pure_sorry:
+                indent = line[: len(line) - len(line.lstrip())]
+                result.append(indent + "  sorry")
+            else:
+                result.extend(body)
+        else:
+            result.append(line)
+            i += 1
+
+    return "\n".join(result)
+
+
 def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
     text = _ensure_lemma_header(text, goal)
     # Normalize ellipsis first (avoid Unicode / spaced form)
