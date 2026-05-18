@@ -120,6 +120,32 @@ def _trim_block_for_prompt(text: str, max_chars: int = 800) -> str:
     tail = t[- max_chars // 2 :].lstrip()
     return head + "\n…\n" + tail
 
+def _why_from_errors(errors: List[str], block_type: str) -> str:
+    """Return a targeted failure message for the LLM based on the Isabelle error text.
+
+    A specific 'why' gives the LLM a concrete signal about *what kind* of fix is
+    needed rather than the generic fallback, improving repair quality.
+    """
+    joined = " ".join(errors).lower()
+    if "type" in joined and ("mismatch" in joined or "error" in joined or "clash" in joined):
+        return "Type mismatch or clash — check that all variables and facts have compatible types."
+    if "failed to apply" in joined or "tactic failed" in joined or "try this" in joined:
+        return "The tactic failed to apply — it does not match the current proof state; try a different method."
+    if "unknown fact" in joined or "undefined" in joined or "undeclared" in joined or "no such" in joined:
+        return "Unknown fact or identifier — only reference names that are visible in PROOF_CONTEXT."
+    if "unification" in joined:
+        return "Unification failed — the goal shape does not match the rule being applied; consider using 'rule' or 'erule' with a more specific lemma."
+    if "no subgoals" in joined:
+        return "No subgoals remain — remove the extra tactic step."
+    if "constructor" in joined and "clash" in joined:
+        return "Constructor clash — check the datatype structure matches the pattern being matched."
+    if "locally fixed" in joined or "fixed variable" in joined:
+        return "Locally fixed variable used incorrectly — avoid introducing new variables not present in the goal."
+    if "sorry" in joined:
+        return "A 'sorry' placeholder remains — replace every sorry with a real proof step."
+    return f"Previous {block_type}-block attempt did not solve the goal; try a structurally different approach (different induction variable, different lemmas, or a calculational proof)."
+
+
 def _is_tactic_line(s: str) -> bool:
     return bool(_TACTIC_LINE.search(s)) and not bool(_STRUCTURAL_LINE.match(s))
 
