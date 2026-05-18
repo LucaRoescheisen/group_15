@@ -752,9 +752,20 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
             if ok:
                 return current_text, True, "stage=2 block:case"
-            # FIX: Return False for unverified changes
-            return current_text, False, "stage=2 partial-progress"
-    
+            # Cascade to Stage 2b with updated text
+            if trace:
+                print("[repair] Stage 2a partial progress — cascading to Stage 2b")
+            lines = current_text.splitlines()
+            _new_hl2 = _find_first_hole(lines)
+            if _new_hl2 is not None:
+                _char_off2 = sum(len(_l) + 1 for _l in lines[:_new_hl2])
+                hole_span = (_char_off2, _char_off2 + len(lines[_new_hl2]))
+            anchor_line, _ = _earliest_failure_anchor(
+                isabelle, session, current_text, default_line_0=(_new_hl2 or hole_line)
+            )
+            focus_line = _clamp_line_index(lines, anchor_line)
+            state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
+
     # Stage 2b: Subproof
     ps, pe = _enclosing_subproof(lines, focus_line)
     if resume_stage <= 2 and ps >= 0 and left() > 3.0:
