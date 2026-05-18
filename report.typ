@@ -71,7 +71,7 @@ spanning easy, medium, and hard difficulty.
 Our contributions are as follows:
 #list(
   [*Hole-filling driver:* a complete implementation of `driver.py` that delegates each sorry placeholder in an Isar skeleton to the stepwise tactic prover, with correct state extraction and apply-only handling.],
-  [*CEGIS repair loop:* a three-stage escalation strategy in `repair.py` that targets local `have`/`show` blocks, enclosing subproofs, and whole-proof regeneration, with partial-progress preservation and fingerprint-based duplicate suppression.],
+  [*CEGIS repair loop:* a three-stage escalation strategy in `repair.py` that targets local `have`/`show` blocks, enclosing subproofs, and whole-proof regeneration. Five targeted improvements are introduced: (1) smarter block deduplication that normalises ATP synonyms, `simp` lemma ordering, and generated fact labels; (2) error-category–specific guidance fed back to the LLM for each repair round; (3) a complete ban-list of all previously failed outlines for whole-proof Stage~3 regeneration; (4) a pre-LLM pass that extracts and directly applies Isabelle's `Try this:` tactic suggestions; and (5) stage-cascade continuation that propagates partial repairs from Stage~1 into Stage~2 rather than bailing out early.],
   [*Baseline comparison:* a reproducible Sledgehammer-only baseline (`baselines/sledge_only.py`) and a systematic evaluation across the HOL main goal corpus and the Isabellm hand-crafted datasets.],
 )
 
