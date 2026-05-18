@@ -27,34 +27,43 @@ thy = build_theory(_build_ml_prolog() + injected, add_print_state=True, end_with
 resps = run_theory(isa, session, thy)
 print(f"Got {len(resps)} responses")
 
-# Dump all NOTE responses fully
+# Dump the FINISHED response's nodes/messages fully
 for i, r in enumerate(resps):
     rtype = str(getattr(r, 'response_type', ''))
     body = getattr(r, 'response_body', None)
-    print(f"\nresp[{i}] type={rtype!r}")
-    if isinstance(body, bytes):
-        body = body.decode('utf-8', errors='replace')
-    if isinstance(body, str) and body.strip().startswith('{'):
-        try:
-            d = json.loads(body)
-            print(f"  parsed JSON keys: {list(d.keys())}")
-            if 'nodes' in d:
-                for n in d['nodes']:
-                    for m in n.get('messages', []):
-                        print(f"  MSG kind={m.get('kind')!r}: {str(m.get('message',''))[:200]}")
-        except:
-            print(f"  raw body: {body[:300]}")
-    elif body:
-        # Pydantic model
-        print(f"  body type: {type(body).__name__}")
-        try:
-            d = body.model_dump() if hasattr(body, 'model_dump') else vars(body)
-            for k, v in d.items():
-                sv = str(v)[:150]
-                print(f"    {k}: {sv}")
-        except:
-            print(f"  body repr: {repr(body)[:300]}")
+    if 'FINISHED' in rtype.upper():
+        print(f"\nFINISHED response[{i}]:")
+        if hasattr(body, 'model_dump'):
+            d = body.model_dump()
+        elif hasattr(body, '__dict__'):
+            d = vars(body)
+        else:
+            d = {}
 
-print("\n\nlast_print_state_block:", repr(last_print_state_block(resps) or '(empty)'))
+        nodes = d.get('nodes', [])
+        print(f"  nodes count: {len(nodes)}")
+        for ni, node in enumerate(nodes):
+            print(f"  node[{ni}]: {node.get('node_name', '')}")
+            messages = node.get('messages', [])
+            print(f"    messages count: {len(messages)}")
+            for mi, msg in enumerate(messages[:20]):
+                kind = msg.get('kind', '?')
+                text = str(msg.get('message', ''))
+                print(f"    msg[{mi}] kind={kind!r}: {text[:300]}")
+    elif 'NOTE' in rtype.upper():
+        # Check note body more carefully
+        print(f"\nNOTE response[{i}]:")
+        if body:
+            try:
+                if hasattr(body, 'model_dump'):
+                    bd = body.model_dump()
+                elif hasattr(body, '__dict__'):
+                    bd = vars(body)
+                else:
+                    bd = {}
+                for k,v in bd.items():
+                    print(f"  {k}: {str(v)[:200]}")
+            except Exception as e:
+                print(f"  error: {e}")
 
 proc.kill()
