@@ -112,7 +112,17 @@ def try_finish(
 ) -> Tuple[bool, float]:
     t0 = time.monotonic()
     thy = build_theory(steps + [fin], add_print_state=False, end_with=None)
-    ok, _ = finished_ok(run_theory(isabelle, session_id, thy, timeout_s=timeout_s))
+    resps = run_theory(isabelle, session_id, thy, timeout_s=timeout_s)
+    ok, d = finished_ok(resps)
+    if not ok:
+        # Debug: print why it failed
+        import sys
+        print(f"[try_finish DEBUG] steps={steps!r} fin={fin!r}", file=sys.stderr)
+        print(f"[try_finish DEBUG] ok={ok} d_ok={d.get('ok')} timed_out={d.get('timeout')}", file=sys.stderr)
+        for node in (d.get('nodes') or []):
+            for msg in (node.get('messages') or []):
+                if msg.get('kind') == 'error':
+                    print(f"[try_finish DEBUG] error: {msg.get('message','')[:300]}", file=sys.stderr)
     return ok, (time.monotonic() - t0) * 1000
 
 
