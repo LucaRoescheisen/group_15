@@ -41,8 +41,14 @@ print(f"Found {len(spans)} sorry hole(s): {spans}")
 full = outline1
 model = "qwen2.5-coder:7b"
 
-for i, span in enumerate(find_sorry_spans(full)):
-    print(f"\n--- Filling hole {i+1} at span {span} ---")
+i = 0
+while True:
+    spans = find_sorry_spans(full)
+    if not spans:
+        break
+    span = spans[0]
+    i += 1
+    print(f"\n--- Filling hole {i} at span {span} ---")
     s, e = span
     print(f"  Context: ...{repr(full[max(0,s-40):e+10])}...")
     new_text, ok, script = _fill_one_hole(
@@ -55,9 +61,10 @@ for i, span in enumerate(find_sorry_spans(full)):
     print(f"  ok={ok}, script={script!r}")
     if ok:
         full = new_text
-        print(f"  ✅ Hole {i+1} filled!")
+        print(f"  ✅ Hole {i} filled!")
     else:
-        print(f"  ❌ Hole {i+1} not filled.")
+        print(f"  ❌ Hole {i} not filled.")
+        break  # can't make progress on this hole, stop
 
 print("\nFinal proof text:")
 print(full)
