@@ -55,6 +55,9 @@ ISABELLE_ERRORS (learn from previous errors and avoid generating proofs that hav
 COUNTEREXAMPLE_HINTS (learn from counterexamples of previous goals and avoid generating goals based on the counterexamples):
 {ce_hints}
 
+INDUCTION_HYPOTHESES (if non-empty, these are already in scope — use them directly in `using` clauses):
+{ih_hints}
+
 PRIOR FAILED BLOCKS (do **not** repeat these ideas/structures; these are bad examples, not templates):
 <<<FAILED_PROOFS
 {prior_failed_blocks}
