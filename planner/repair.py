@@ -825,12 +825,17 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
 # ---------- Public helper: whole-proof regeneration with prior-failure banlist ----------
 def regenerate_whole_proof(*, full_text: str, goal_text: str, model: Optional[str],
                            isabelle, session: str, budget_s: float = 20.0,
-                           trace: bool = False, prior_outline_text: Optional[str] = None
+                           trace: bool = False,
+                           prior_outline_text: Optional[str] = None,
+                           prior_outline_texts: Optional[List[str]] = None,
                           ) -> Tuple[str, bool, str]:
     """
     Re-generate the last proof..qed block (or from the lemma head to EOF if no qed yet),
-    feeding decisive lines from `prior_outline_text` as a ban list so the LLM avoids
-    repeating previously failed tactics. Only returns a patched text if it *verifies*.
+    feeding all previously failed outlines as a ban list so the LLM avoids repeating
+    any of them — not just the immediately preceding one.
+
+    `prior_outline_texts` is the preferred argument (a list of all failed outlines so far).
+    `prior_outline_text` is kept for backwards compatibility and is merged into the list.
     """
     lines = full_text.splitlines()
     ws, we = _enclosing_whole_proof(lines)
