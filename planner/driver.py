@@ -518,6 +518,7 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
         repair_progress: dict[str, int] = {}
         stage_tries: dict[Tuple[str, int], int] = {}
         _skip_fill_logged_once: set[Tuple[str, int]] = set()
+        failed_outlines: List[str] = []   # accumulates every outline tried so Stage 3 never repeats any
 
         focused_hole_key: Optional[str] = None
 
