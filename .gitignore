@@ -1,0 +1,17 @@
+# Claude Code internal data
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+
+# Isabelle server / temp logs
+isabelle_server.log
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

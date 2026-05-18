@@ -1,34 +1,36 @@
 #!/usr/bin/env python3
 """
-sledge_only.py — Standalone Sledgehammer-only runner (headless Isabelle).
+sledge_only.py — Standalone Sledgehammer-only runner via Isabelle server protocol.
 
-Flow
-1) Create a throwaway session with your goal and `sledgehammer [...]` inside `oops`.
-2) `isabelle build` it (no docs/browser info).
-3) Read the Sledgehammer suggestion ("Try this: by …") from the session log:
-   - scan $ISABELLE_OUTPUT/log for latest SledgeOnly* (supports .gz),
-   - else `isabelle build_log SledgeOnly` (no flags),
-   - else `isabelle process` in the temp dir to print messages directly.
-4) Re-write lemma to `by (…)` and rebuild to confirm.
-
-Notes
-- Converts Unicode (∈ ∪ ⟹ λ etc.) to Isabelle escapes (\<in> \<union> \<Longrightarrow> \<lambda> …).
-- Imports default to `Main`; if `List` is also given alongside `Main`, it is stripped (Main already includes it).
-- You can pick provers (e.g., "e vampire z3 cvc5"). If you only have some installed, narrow it (e.g., "z3 e").
+Flow:
+1) Start the Isabelle server (uses ISABELLE_INST_DIR on Windows for Cygwin bat).
+2) Open a HOL session.
+3) For each goal, submit a theory with `sledgehammer [...]` + `sorry` to the server.
+4) Parse NOTE/FINISHED messages for "Try this: by ..." suggestions.
+5) Re-verify the first valid suggestion by re-submitting without `sorry`.
 """
 
 from __future__ import annotations
 import argparse
-import gzip
+import asyncio
+import json
 import os
 import re
-import subprocess
+import sys
 import tempfile
 import time
+import warnings
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-ISABELLE_BIN = os.environ.get("ISABELLE_BIN", "isabelle")
+# Suppress the noisy asyncio transport warning on Windows/Python 3.14 shutdown
+warnings.filterwarnings("ignore", category=ResourceWarning)
+
+# On Windows, set ISABELLE_INST_DIR so isabelle_client finds the bundled Cygwin bat.
+_INST = os.environ.get("ISABELLE_INST_DIR", r"C:\Program Files\Isabelle2025-2")
+os.environ.setdefault("ISABELLE_INST_DIR", _INST)
+
+from isabelle_client import start_isabelle_server, get_isabelle_client  # noqa: E402
 
 # ---------- Unicode → Isabelle ----------
 UNICODE_MAP = {
@@ -49,182 +51,216 @@ UNICODE_RE = re.compile("|".join(map(re.escape, sorted(UNICODE_MAP.keys(), key=l
 def to_isabelle_symbols(s: str) -> str:
     return UNICODE_RE.sub(lambda m: UNICODE_MAP[m.group(0)], s)
 
-# ---------- Shell helpers ----------
-def run(cmd: List[str], cwd: Optional[str] = None, timeout: Optional[int] = None) -> Tuple[int, str, str]:
-    try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, (p.stdout or ""), (p.stderr or "")
-    except subprocess.TimeoutExpired as e:
-        out = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")
-        err = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else "")
-        return 124, out, err + "\n[TIMEOUT]"
-
-def isabelle_getenv(name: str) -> Optional[str]:
-    rc, out, _ = run([ISABELLE_BIN, "getenv", "-b", name])
-    return out.strip() if rc == 0 and out.strip() else None
-
-# ---------- Session files ----------
-def write_root(dirpath: Path, session_name: str, theories: List[str]) -> None:
-    text = f"session {session_name} = HOL +\n  theories\n" + "".join(f"    {t}\n" for t in theories)
-    (dirpath / "ROOT").write_text(text, encoding="utf-8")
-
+# ---------- Theory text builders ----------
 def sanitize_imports(imports: List[str]) -> List[str]:
     imps = list(dict.fromkeys(imports))
     if "Main" not in imps:
         imps.insert(0, "Main")
-    # Explicit 'List' can trigger local lookup in a fresh session; Main already includes it.
     if "List" in imps and "Main" in imps:
         imps = [x for x in imps if x != "List"]
     return imps
 
-def thy_probe_text(theory: str, imports: List[str], goal: str, sh_timeout: int, provers: Optional[str]) -> str:
+def thy_probe_text(imports: List[str], goal: str, sh_timeout: int, provers: Optional[str]) -> str:
     imps = " ".join(sanitize_imports(imports))
     g = to_isabelle_symbols(goal)
-    header = f'theory {theory}\n  imports {imps}\nbegin\n'
-    opts = [f"timeout = {sh_timeout}", "verbose"]  # 'verbose' encourages a visible “Try this:”
+    opts = [f"timeout = {sh_timeout}", "verbose"]
     if provers:
         opts.append(f"provers = {provers}")
-    sh = "  sledgehammer [" + ", ".join(opts) + "]\n"
-    return header + "\n" + f'lemma "{g}"\n' + sh + "  oops\nend\n"
+    sh = "  sledgehammer [" + ", ".join(opts) + "]"
+    return (
+        f"theory Scratch\n  imports {imps}\nbegin\n\n"
+        f'lemma goal: "{g}"\n'
+        f"{sh}\n"
+        f"  sorry\nend\n"
+    )
 
-def thy_by_text(theory: str, imports: List[str], goal: str, by_text: str) -> str:
+def thy_verify_text(imports: List[str], goal: str, by_text: str) -> str:
     imps = " ".join(sanitize_imports(imports))
     g = to_isabelle_symbols(goal)
-    header = f'theory {theory}\n  imports {imps}\nbegin\n'
-    return header + "\n" + f'lemma "{g}"\n  {by_text}\nend\n'
-
-# ---------- Build + capture ----------
-def build_session(dirpath: Path, session: str, timeout: int) -> Tuple[int, str, str]:
-    return run([
-        ISABELLE_BIN, "build",
-        "-D", str(dirpath),
-        "-o", "document=false",
-        "-o", "browser_info=false",
-        "-o", "parallel_proofs=0",
-        "-o", "threads=1",
-        session
-    ], cwd=str(dirpath), timeout=timeout)
-
-def read_log_from_store(session: str) -> str:
-    out_dir = isabelle_getenv("ISABELLE_OUTPUT")
-    if not out_dir:
-        return ""
-    log_dir = Path(out_dir) / "log"
-    if not log_dir.is_dir():
-        return ""
-    # pick newest matching file
-    candidates = list(log_dir.glob(f"{session}*"))
-    if not candidates:
-        return ""
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    p = candidates[0]
-    try:
-        if p.suffix == ".gz":
-            with gzip.open(p, "rt", encoding="utf-8", errors="replace") as f:
-                return f.read()
-        return p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        try:
-            return p.read_bytes().decode("utf-8", errors="replace")
-        except Exception:
-            return ""
-
-def read_log_via_build_log(session: str) -> str:
-    # Very conservative: no flags — some Isabelle versions have different options.
-    rc, out, err = run([ISABELLE_BIN, "build_log", session])
-    text = (out or "") + ("\n" + err if err else "")
-    # ignore the usage banner if that’s all we got
-    if "Usage: isabelle build_log" in text and len(text.strip().splitlines()) < 20:
-        return ""
-    return text.strip()
-
-def read_log_via_process(tmp_dir: Path, theory: str, imports: List[str], goal: str,
-                         sh_timeout: int, provers: Optional[str], timeout: int) -> str:
-    """
-    Last-resort fallback: run `isabelle process` in the temp dir and `use_thy` the theory.
-    This prints messages (including Sledgehammer output) to stdout.
-    """
-    (tmp_dir / f"{theory}.thy").write_text(
-        thy_probe_text(theory, imports, goal, sh_timeout, provers), encoding="utf-8"
+    return (
+        f"theory Scratch\n  imports {imps}\nbegin\n\n"
+        f'lemma goal: "{g}"\n'
+        f"  {by_text}\nend\n"
     )
-    cmd = [ISABELLE_BIN, "process", "-l", "HOL", "-e", f'use_thy "{theory}";']
-    rc, out, err = run(cmd, cwd=str(tmp_dir), timeout=timeout)
-    return (out or "") + ("\n" + err if err else "")
 
-# ---------- Suggestion parsing ----------
-TRY_THIS = re.compile(r"Try this:\s*(.*)")
-BY_PAREN = re.compile(r"\bby\s*\([^)]*\)")
-TIMING_TAIL = re.compile(r"\s*\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\)\s*$")
+# ---------- Response parsing ----------
+TIMING_TAIL = re.compile(r"\s*\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\)?\s*$")
+TRY_THIS_RE = re.compile(r"(?i)\btry this:\s*(.*)")
+BY_LINE_RE = re.compile(r"\b(by\s*\([^)]+\)|by\s+\w[\w\s]*)")
 
-def clean_suggestion(s: str) -> str:
-    s = TIMING_TAIL.sub("", s)  # drop trailing "(0.8 ms)" etc.
-    s = s.rstrip(".")           # drop trailing period if present
-    return s.strip()
+def _decode_body(body) -> dict:
+    if body is None:
+        return {}
+    if isinstance(body, dict):
+        return body
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            body = body.decode("utf-8", "replace")
+        except Exception:
+            body = str(body)
+    if isinstance(body, str):
+        try:
+            return json.loads(body)
+        except Exception:
+            return {"raw": body}
+    # Pydantic model or other object with model_dump
+    if hasattr(body, "model_dump"):
+        try:
+            return body.model_dump()
+        except Exception:
+            pass
+    # fallback: try __dict__
+    try:
+        return vars(body)
+    except Exception:
+        return {}
 
-def extract_suggestions(text: str) -> List[str]:
-    lines = text.splitlines()
+def _response_type(r) -> str:
+    rt = getattr(r, "response_type", None)
+    if rt is None:
+        return ""
+    if hasattr(rt, "name"):
+        return rt.name.upper()
+    return str(rt).upper()
+
+def _get_field(obj, key: str):
+    """Get field from dict or object attribute."""
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+def _iter_node_messages(node) -> List[str]:
+    """Extract message strings from a node (dict or Pydantic object)."""
     out: List[str] = []
-
-    # Primary: “Try this: …”
-    for i, ln in enumerate(lines):
-        m = TRY_THIS.search(ln)
-        if not m:
-            continue
-        s = m.group(1).strip()
-        # naive continuation
-        if i + 1 < len(lines):
-            nxt = lines[i + 1].strip()
-            if nxt.startswith("by ") or (s and not s.endswith(".")) and nxt and not nxt.endswith(":"):
-                s = (s + " " + nxt).strip()
-        s = clean_suggestion(s)
-        if s.startswith("by ") or " by " in s:
-            if s not in out:
-                out.append(s)
-
-    # Secondary: plain “by (metis …)” occurrences (without “Try this:”)
-    for ln in lines:
-        m = BY_PAREN.search(ln)
-        if m:
-            s = "by " + m.group(0)[3:].strip()
-            s = clean_suggestion(s)
-            if s not in out:
-                out.append(s)
-
+    # node.messages can be a list of dicts or objects
+    messages = _get_field(node, "messages") or []
+    for m in messages:
+        msg = (_get_field(m, "message") or _get_field(m, "text") or "")
+        if msg:
+            out.append(str(msg))
     return out
 
-# ---------- Prove one goal ----------
-def prove_with_sledgehammer(goal: str, imports: List[str], sh_timeout: int, timeout: int,
-                            provers: Optional[str]) -> Tuple[bool, Optional[str], str]:
-    with tempfile.TemporaryDirectory(prefix="sledge_only_") as tmp:
-        tmp = Path(tmp)
-        session = "SledgeOnly"
-        theory = "SledgeOnly"
+def _all_messages(responses) -> List[str]:
+    msgs: List[str] = []
+    for r in (responses or []):
+        body_obj = getattr(r, "response_body", None)
+        body = _decode_body(body_obj)
+        # Top-level message field
+        for key in ("message", "text", "content"):
+            v = body.get(key)
+            if v:
+                msgs.append(str(v))
+        # Nested nodes (FINISHED use_theories payload)
+        nodes_raw = body.get("nodes") or _get_field(body_obj, "nodes") or []
+        for node in nodes_raw:
+            msgs.extend(_iter_node_messages(node))
+            # node may be a dict with nested node_messages
+            if isinstance(node, dict):
+                for m in node.get("messages", []):
+                    msg = m.get("message") or m.get("text") or ""
+                    if msg:
+                        msgs.append(str(msg))
+        # raw fallback
+        raw = body.get("raw")
+        if raw:
+            msgs.append(str(raw))
+    return msgs
 
-        write_root(tmp, session, [theory])
-        (tmp / f"{theory}.thy").write_text(
-            thy_probe_text(theory, imports, goal, sh_timeout, provers), encoding="utf-8"
-        )
+def extract_suggestions(responses) -> List[str]:
+    out: List[str] = []
+    all_text = "\n".join(_all_messages(responses))
+    lines = all_text.splitlines()
+    for i, ln in enumerate(lines):
+        m = TRY_THIS_RE.search(ln)
+        if m:
+            s = m.group(1).strip()
+            # naive continuation
+            if i + 1 < len(lines):
+                nxt = lines[i + 1].strip()
+                if nxt.startswith("by ") or (s and not s.endswith(".") and nxt and not nxt.endswith(":")):
+                    s = (s + " " + nxt).strip()
+            s = TIMING_TAIL.sub("", s).rstrip(".").strip()
+            if s and ("by " in s or s.startswith("by")) and s not in out:
+                out.append(s)
+    # fallback: any "by (...)" line
+    for ln in lines:
+        m = BY_LINE_RE.search(ln)
+        if m:
+            s = TIMING_TAIL.sub("", m.group(1)).strip()
+            if s not in out:
+                out.append(s)
+    return out
 
-        # Build (so the session gets logged)
-        build_session(tmp, session, timeout)
+def finished_ok(responses) -> bool:
+    for r in (responses or []):
+        rt = _response_type(r)
+        if "FINISHED" not in rt:
+            continue
+        body_obj = getattr(r, "response_body", None)
+        # Try attribute access first (Pydantic model)
+        ok_val = _get_field(body_obj, "ok")
+        if ok_val is None:
+            body = _decode_body(body_obj)
+            ok_val = body.get("ok")
+            timeout_val = str(body.get("timeout", "")).lower()
+        else:
+            timeout_val = str(_get_field(body_obj, "timeout") or "").lower()
+        if bool(ok_val) and timeout_val not in ("1", "true", "yes"):
+            return True
+    return False
 
-        # Try to read the log (store → build_log → process fallback)
-        text = read_log_from_store(session)
-        if not text.strip():
-            text = read_log_via_build_log(session)
-        if not text.strip():
-            text = read_log_via_process(tmp, theory, imports, goal, sh_timeout, provers, timeout)
+# ---------- Core prover ----------
+def _to_cygwin(p: str) -> str:
+    """Convert Windows path to Cygwin path for the Isabelle server."""
+    s = p.replace("\\", "/")
+    m = re.match(r"^([A-Za-z]):(.*)", s)
+    if m:
+        return f"/cygdrive/{m.group(1).lower()}{m.group(2)}"
+    return s
 
-        suggestions = extract_suggestions(text)
+def _run_theory(isabelle, session_id: str, theory_text: str, timeout_s: int):
+    """Write Scratch.thy to a temp dir and call use_theories. Returns responses."""
+    with tempfile.TemporaryDirectory(prefix="sledge_") as tmp:
+        thy_path = os.path.join(tmp, "Scratch.thy")
+        with open(thy_path, "w", encoding="utf-8") as f:
+            f.write(theory_text)
+        # Isabelle server runs in Cygwin — pass Cygwin path
+        master_dir = _to_cygwin(tmp)
+        try:
+            responses = list(isabelle.use_theories(
+                theories=["Scratch"],
+                session_id=session_id,
+                master_dir=master_dir,
+            ))
+        except Exception as e:
+            print(f"  [warning] use_theories: {e}", flush=True)
+            responses = []
+        return responses
 
-        # Validate the first proof that checks
-        for by in suggestions:
-            (tmp / f"{theory}.thy").write_text(thy_by_text(theory, imports, goal, by), encoding="utf-8")
-            rc2, _, _ = build_session(tmp, session, timeout)
-            if rc2 == 0:
-                return True, by, text
+def prove_with_sledgehammer(
+    isabelle,
+    session_id: str,
+    goal: str,
+    imports: List[str],
+    sh_timeout: int,
+    goal_timeout: int,
+    provers: Optional[str],
+) -> Tuple[bool, Optional[str], List[str]]:
+    # Phase 1: run sledgehammer
+    probe_thy = thy_probe_text(imports, goal, sh_timeout, provers)
+    resps = _run_theory(isabelle, session_id, probe_thy, goal_timeout)
+    msgs = _all_messages(resps)
 
-        return False, None, text
+    suggestions = extract_suggestions(resps)
+
+    # Phase 2: verify each suggestion
+    for by in suggestions:
+        verify_thy = thy_verify_text(imports, goal, by)
+        vresps = _run_theory(isabelle, session_id, verify_thy, goal_timeout)
+        if finished_ok(vresps):
+            return True, by, msgs
+
+    return False, None, msgs
 
 # ---------- CLI ----------
 def read_goals(path: str) -> List[str]:
@@ -232,63 +268,115 @@ def read_goals(path: str) -> List[str]:
         return [ln.strip() for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
 
 def parse_args() -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description="Sledgehammer-only runner (headless Isabelle)")
+    ap = argparse.ArgumentParser(description="Sledgehammer-only baseline (Isabelle server protocol)")
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--goal", type=str)
     src.add_argument("--file", type=str)
     ap.add_argument("--imports", nargs="+", default=["Main"])
-    ap.add_argument("--sledge-timeout", type=int, default=10)
-    ap.add_argument("--goal-timeout", type=int, default=60)
+    ap.add_argument("--sledge-timeout", type=int, default=30)
+    ap.add_argument("--goal-timeout", type=int, default=120)
     ap.add_argument("--provers", type=str, default=None)
     ap.add_argument("--print-logs", action="store_true")
-    ap.add_argument("--log-lines", type=int, default=28)
+    ap.add_argument("--log-lines", type=int, default=20)
+    ap.add_argument("--isabelle-inst-dir", type=str,
+                    default=os.environ.get("ISABELLE_INST_DIR", r"C:\Program Files\Isabelle2025-2"))
     return ap.parse_args()
 
-def print_log_snippet(text: str, n: int) -> None:
-    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+def print_log_snippet(msgs: List[str], n: int) -> None:
+    lines = [l for m in msgs for l in m.splitlines() if l.strip()]
     if not lines:
-        print("(no log)")
+        print("  (no messages)")
         return
-    head = lines[:n]
-    tail = lines[-n:] if len(lines) > n else []
-    print("----- Sledgehammer log (head) -----")
-    for ln in head:
-        print(ln)
-    if tail:
-        print("----- Sledgehammer log (tail) -----")
-        for ln in tail:
-            print(ln)
+    for ln in lines[:n]:
+        print(f"  {ln}")
+    if len(lines) > n:
+        print(f"  ... ({len(lines) - n} more lines)")
 
 def main() -> None:
     args = parse_args()
+    os.environ["ISABELLE_INST_DIR"] = args.isabelle_inst_dir
+
     goals = [args.goal] if args.goal else read_goals(args.file)
-    print("=== Sledgehammer-only (standalone) ===")
-    print(f"Goals: {len(goals)} | imports: {' '.join(sanitize_imports(args.imports))} | "
-          f"sledge-timeout: {args.sledge_timeout}s | goal-timeout: {args.goal_timeout}s")
+    print("=== Sledgehammer-only baseline (server protocol) ===")
+    print(f"Goals: {len(goals)} | imports: {' '.join(sanitize_imports(args.imports))}")
+    print(f"sledge-timeout: {args.sledge_timeout}s | goal-timeout: {args.goal_timeout}s")
+    print(f"ISABELLE_INST_DIR: {args.isabelle_inst_dir}")
+
+    print("\nStarting Isabelle server...", flush=True)
+    try:
+        server_info, proc = start_isabelle_server(name="isabelle", log_file="isabelle_server.log")
+    except Exception as e:
+        print(f"ERROR: Failed to start Isabelle server: {e}")
+        sys.exit(1)
+    print(f"Server: {server_info.strip()}")
+
+    isabelle = get_isabelle_client(server_info)
+    try:
+        session_resps = isabelle.session_start(session="HOL")
+        # Extract session_id from the FINISHED response
+        session_id = None
+        for r in session_resps:
+            rt = _response_type(r)
+            if "FINISHED" in rt:
+                body = getattr(r, "response_body", None)
+                if hasattr(body, "session_id"):
+                    session_id = body.session_id
+                    break
+                d = _decode_body(body)
+                if "session_id" in d:
+                    session_id = d["session_id"]
+                    break
+        if not session_id:
+            print(f"ERROR: Could not extract session_id from: {session_resps}")
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            sys.exit(1)
+    except Exception as e:
+        print(f"ERROR: Failed to start HOL session: {e}")
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        sys.exit(1)
+    print(f"Session ID: {session_id}\n", flush=True)
 
     ok = 0
     times: List[float] = []
-    for i, g in enumerate(goals, 1):
-        print(f"[{i}/{len(goals)}] {g}")
-        t0 = time.time()
-        success, method, log = prove_with_sledgehammer(
-            g, args.imports, args.sledge_timeout, args.goal_timeout, args.provers
-        )
-        dt = time.time() - t0
-        times.append(dt)
-        if success:
-            ok += 1
-            print(f"  -> OK    ({dt:.2f}s)  {method}")
-        else:
-            print(f"  -> FAIL  ({dt:.2f}s)")
-            if args.print_logs:
-                print_log_snippet(log, args.log_lines)
+    try:
+        for i, g in enumerate(goals, 1):
+            print(f"[{i}/{len(goals)}] {g}", flush=True)
+            t0 = time.time()
+            success, method, msgs = prove_with_sledgehammer(
+                isabelle, session_id, g,
+                args.imports, args.sledge_timeout, args.goal_timeout, args.provers
+            )
+            dt = time.time() - t0
+            times.append(dt)
+            if success:
+                ok += 1
+                print(f"  -> OK    ({dt:.1f}s)  {method}")
+            else:
+                print(f"  -> FAIL  ({dt:.1f}s)")
+                if args.print_logs:
+                    print_log_snippet(msgs, args.log_lines)
+            sys.stdout.flush()
+    finally:
+        try:
+            isabelle.shutdown()
+        except Exception:
+            pass
+        try:
+            proc.terminate()
+        except Exception:
+            pass
 
-    mid = sorted(times)[len(times)//2] if times else 0.0
-    avg = sum(times)/len(times) if times else 0.0
+    mid = sorted(times)[len(times) // 2] if times else 0.0
+    avg = sum(times) / len(times) if times else 0.0
     print("\n=== Summary ===")
-    print(f"Success: {ok}/{len(goals)} ({(ok/max(1,len(goals))*100):.1f}%)")
-    print(f"Median time: {mid:.2f}s | Average time: {avg:.2f}s")
+    print(f"Success: {ok}/{len(goals)} ({ok / max(1, len(goals)) * 100:.1f}%)")
+    print(f"Median time: {mid:.1f}s | Average time: {avg:.1f}s")
 
 if __name__ == "__main__":
     main()

@@ -169,6 +169,16 @@ def run_theory(
         with open(p, "w", encoding="utf-8") as f:
             f.write(theory_text)
 
+        # On Windows, Isabelle runs inside Cygwin via the wrapper bat.
+        # The server needs Cygwin-style paths (/cygdrive/c/...).
+        master_dir = tmpdir.name
+        if os.name == "nt":
+            import re as _re
+            s = master_dir.replace("\\", "/")
+            m = _re.match(r"^([A-Za-z]):(.*)", s)
+            if m:
+                master_dir = f"/cygdrive/{m.group(1).lower()}{m.group(2)}"
+
         # Resolve wall-clock timeout (seconds)
         if timeout_s is None:
             timeout_s = int(ISABELLE_USE_THEORIES_TIMEOUT_S or 0)
@@ -180,7 +190,7 @@ def run_theory(
         if timeout_s > 0:
             # Always enforce a wall-clock timeout (even if native timeouts exist but are ignored).
             with ThreadPoolExecutor(max_workers=1) as ex:
-                fut = ex.submit(_use_theories_call, isabelle, session_id=session_id, master_dir=tmpdir.name, timeout_s=timeout_s)
+                fut = ex.submit(_use_theories_call, isabelle, session_id=session_id, master_dir=master_dir, timeout_s=timeout_s)
                 try:
                     return fut.result(timeout=timeout_s)
                 except FuturesTimeout:
@@ -190,7 +200,7 @@ def run_theory(
                     return []
 
         # No timeout requested → direct call
-        return list(isabelle.use_theories(theories=["Scratch"], session_id=session_id, master_dir=tmpdir.name))
+        return list(isabelle.use_theories(theories=["Scratch"], session_id=session_id, master_dir=master_dir))
     finally:
         tmpdir.cleanup()
 
@@ -282,6 +292,39 @@ def use_timeouts_count() -> int:
     return int(_use_timeouts)
 
 
+def session_start(isabelle, session: str = "HOL") -> str:
+    """Start an Isabelle session and return the session_id string.
+
+    Handles both old isabelle_client (<1.x) that returned a plain string
+    and new versions (>=1.1.1) that return a list of IsabelleResponse objects.
+    """
+    result = isabelle.session_start(session=session)
+    # New API: returns a list of responses
+    if isinstance(result, (list, tuple)):
+        for r in result:
+            # Check FINISHED response with session_id
+            body = getattr(r, "response_body", None)
+            if body is not None:
+                # Pydantic model with session_id attribute
+                sid = getattr(body, "session_id", None)
+                if sid:
+                    return str(sid)
+                # dict-like body
+                if isinstance(body, dict) and "session_id" in body:
+                    return str(body["session_id"])
+                # Try model_dump
+                if hasattr(body, "model_dump"):
+                    try:
+                        d = body.model_dump()
+                        if "session_id" in d:
+                            return str(d["session_id"])
+                    except Exception:
+                        pass
+        raise ValueError(f"Could not extract session_id from session_start response: {result}")
+    # Old API: returns the session_id string directly
+    return str(result)
+
+
 __all__ = [
     # re-exports
     "start_isabelle_server", "get_isabelle_client", "IsabelleResponse",
@@ -290,6 +333,7 @@ __all__ = [
     "finished_ok", "last_print_state_block", "use_calls_count", "use_timeouts_count",
     "last_call_timed_out",
     "graceful_terminate",
+    "session_start",
 ]
 
 # Cross-runtime shutdown helper (works for multiprocessing.Process and subprocess.Popen)

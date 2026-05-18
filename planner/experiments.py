@@ -41,6 +41,7 @@ from prover.isabelle_api import (
     build_theory,
     run_theory,
     finished_ok,
+    session_start as _session_start_compat,
 )
 from prover import config as CFG  # NEW: live switches for premise/context
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -187,14 +188,14 @@ def _session_start_with_fallback(client):
     """
     wanted = _pick_session_name()
     try:
-        sid = client.session_start(session=wanted)
+        sid = _session_start_compat(client, session=wanted)
         return sid, wanted
     except Exception as e:
         msg = str(e)
         # "FAILED" is what isabelle_client raises when the image isn't available.
         if "FAILED" in msg and wanted != "HOL":
             try:
-                sid = client.session_start(session="HOL")
+                sid = _session_start_compat(client, session="HOL")
                 print(f"[experiments] session '{wanted}' unavailable → falling back to 'HOL'")
                 return sid, "HOL"
             except Exception:

@@ -1,0 +1,84 @@
+{
+  "system": "B",
+  "dataset": "logic.txt",
+  "model": "qwen2.5-coder:7b",
+  "params": {
+    "file": "datasets/logic.txt",
+    "model": null,
+    "timeout": 60,
+    "beam": 4,
+    "max_depth": 8,
+    "hint_lemmas": 6,
+    "sledge": true,
+    "sledge_timeout": 20,
+    "sledge_every": 2,
+    "trace": false,
+    "limit": null
+  },
+  "summary": {
+    "n": 5,
+    "passed": 0,
+    "timeouts": 0,
+    "failures": 5,
+    "rate": 0.0,
+    "median_s": 0.0,
+    "avg_s": 0.0
+  },
+  "goals": [
+    {
+      "index": 1,
+      "goal": "(True ∧ P) ⟷ P",
+      "success": false,
+      "timeout": false,
+      "elapsed": 90.22,
+      "depth": 1,
+      "steps": [
+        "lemma \"(True ∧ P) ⟷ P\""
+      ]
+    },
+    {
+      "index": 2,
+      "goal": "(P ∧ True) ⟷ P",
+      "success": false,
+      "timeout": false,
+      "elapsed": 74.44,
+      "depth": 1,
+      "steps": [
+        "lemma \"(P ∧ True) ⟷ P\""
+      ]
+    },
+    {
+      "index": 3,
+      "goal": "(P ∨ False) ⟷ P",
+      "success": false,
+      "timeout": false,
+      "elapsed": 80.3,
+      "depth": 1,
+      "steps": [
+        "lemma \"(P ∨ False) ⟷ P\""
+      ]
+    },
+    {
+      "index": 4,
+      "goal": "(¬ ¬ P) ⟷ P",
+      "success": false,
+      "timeout": false,
+      "elapsed": 77.16,
+      "depth": 1,
+      "steps": [
+        "lemma \"(¬ ¬ P) ⟷ P\""
+      ]
+    },
+    {
+      "index": 5,
+      "goal": "(P ⟶ Q) ⟷ (¬ P ∨ Q)",
+      "success": false,
+      "timeout": false,
+      "elapsed": 69.11,
+      "depth": 1,
+      "steps": [
+        "lemma \"(P ⟶ Q) ⟷ (¬ P ∨ Q)\""
+      ]
+    }
+  ]
+}

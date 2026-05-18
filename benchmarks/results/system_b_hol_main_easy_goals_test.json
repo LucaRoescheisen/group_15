@@ -1,0 +1,249 @@
+{
+  "system": "B",
+  "dataset": "hol_main_easy_goals_test.txt",
+  "model": "qwen2.5-coder:7b",
+  "params": {
+    "file": "datasets/hol_main_easy_goals_test.txt",
+    "model": null,
+    "timeout": 120,
+    "beam": 4,
+    "max_depth": 8,
+    "hint_lemmas": 6,
+    "sledge": true,
+    "sledge_timeout": 30,
+    "sledge_every": 2,
+    "trace": false,
+    "limit": 20
+  },
+  "summary": {
+    "n": 20,
+    "passed": 0,
+    "timeouts": 0,
+    "failures": 20,
+    "rate": 0.0,
+    "median_s": 0.0,
+    "avg_s": 0.0
+  },
+  "goals": [
+    {
+      "index": 1,
+      "goal": "(A ∧ (B ⟶ C)) ⟶ ((A ∧ B) ⟶ C)",
+      "success": false,
+      "timeout": false,
+      "elapsed": 118.99,
+      "depth": 1,
+      "steps": [
+        "lemma \"(A ∧ (B ⟶ C)) ⟶ ((A ∧ B) ⟶ C)\""
+      ]
+    },
+    {
+      "index": 2,
+      "goal": "(A ⟶ (B ⟶ C)) ⟶ (A ∧ B ⟶ C)",
+      "success": false,
+      "timeout": false,
+      "elapsed": 108.28,
+      "depth": 1,
+      "steps": [
+        "lemma \"(A ⟶ (B ⟶ C)) ⟶ (A ∧ B ⟶ C)\""
+      ]
+    },
+    {
+      "index": 3,
+      "goal": "(¬ A ∧ ¬ B) ⟷ ¬(A ∨ B)",
+      "success": false,
+      "timeout": false,
+      "elapsed": 115.99,
+      "depth": 1,
+      "steps": [
+        "lemma \"(¬ A ∧ ¬ B) ⟷ ¬(A ∨ B)\""
+      ]
+    },
+    {
+      "index": 4,
+      "goal": "(A ⟶ B) ⟷ (¬A ∨ B)",
+      "success": false,
+      "timeout": false,
+      "elapsed": 121.21,
+      "depth": 1,
+      "steps": [
+        "lemma \"(A ⟶ B) ⟷ (¬A ∨ B)\""
+      ]
+    },
+    {
+      "index": 5,
+      "goal": "(A ⟶ B) ⟶ (¬B ⟶ ¬A)",
+      "success": false,
+      "timeout": false,
+      "elapsed": 114.58,
+      "depth": 1,
+      "steps": [
+        "lemma \"(A ⟶ B) ⟶ (¬B ⟶ ¬A)\""
+      ]
+    },
+    {
+      "index": 6,
+      "goal": "(A ∧ (B ∨ C)) ⟶ ((A ∧ B) ∨ (A ∧ C))",
+      "success": false,
+      "timeout": false,
+      "elapsed": 119.96,
+      "depth": 1,
+      "steps": [
+        "lemma \"(A ∧ (B ∨ C)) ⟶ ((A ∧ B) ∨ (A ∧ C))\""
+      ]
+    },
+    {
+      "index": 7,
+      "goal": "((A ⟶ C) ∧ (B ⟶ C)) ⟶ (A ∨ B ⟶ C)",
+      "success": false,
+      "timeout": false,
+      "elapsed": 119.62,
+      "depth": 1,
+      "steps": [
+        "lemma \"((A ⟶ C) ∧ (B ⟶ C)) ⟶ (A ∨ B ⟶ C)\""
+      ]
+    },
+    {
+      "index": 8,
+      "goal": "(∀x. P x) ⟷ (¬ (∃x. ¬ P x))",
+      "success": false,
+      "timeout": false,
+      "elapsed": 121.9,
+      "depth": 1,
+      "steps": [
+        "lemma \"(∀x. P x) ⟷ (¬ (∃x. ¬ P x))\""
+      ]
+    },
+    {
+      "index": 9,
+      "goal": "(∃x. P x ∧ Q x) ⟶ ((∃x. P x) ∧ (∃x. Q x))",
+      "success": false,
+      "timeout": false,
+      "elapsed": 92.97,
+      "depth": 1,
+      "steps": [
+        "lemma \"(∃x. P x ∧ Q x) ⟶ ((∃x. P x) ∧ (∃x. Q x))\""
+      ]
+    },
+    {
+      "index": 10,
+      "goal": "(∀x. P x ⟶ Q x) ⟶ ((∃x. P x) ⟶ (∃x. Q x))",
+      "success": false,
+      "timeout": false,
+      "elapsed": 100.17,
+      "depth": 1,
+      "steps": [
+        "lemma \"(∀x. P x ⟶ Q x) ⟶ ((∃x. P x) ⟶ (∃x. Q x))\""
+      ]
+    },
+    {
+      "index": 11,
+      "goal": "(if A then B else B) = B",
+      "success": false,
+      "timeout": false,
+      "elapsed": 81.95,
+      "depth": 1,
+      "steps": [
+        "lemma \"(if A then B else B) = B\""
+      ]
+    },
+    {
+      "index": 12,
+      "goal": "(f = g) ⟷ (∀x. f x = g x)",
+      "success": false,
+      "timeout": false,
+      "elapsed": 101.33,
+      "depth": 1,
+      "steps": [
+        "lemma \"(f = g) ⟷ (∀x. f x = g x)\""
+      ]
+    },
+    {
+      "index": 13,
+      "goal": "A ⊆ B ⟷ (A - B = {})",
+      "success": false,
+      "timeout": false,
+      "elapsed": 105.63,
+      "depth": 1,
+      "steps": [
+        "lemma \"A ⊆ B ⟷ (A - B = {})\""
+      ]
+    },
+    {
+      "index": 14,
+      "goal": "Pow A ⊆ Pow B ⟷ A ⊆ B",
+      "success": false,
+      "timeout": false,
+      "elapsed": 99.79,
+      "depth": 1,
+      "steps": [
+        "lemma \"Pow A ⊆ Pow B ⟷ A ⊆ B\""
+      ]
+    },
+    {
+      "index": 15,
+      "goal": "Pow A ∩ Pow B = Pow (A ∩ B)",
+      "success": false,
+      "timeout": false,
+      "elapsed": 92.24,
+      "depth": 1,
+      "steps": [
+        "lemma \"Pow A ∩ Pow B = Pow (A ∩ B)\""
+      ]
+    },
+    {
+      "index": 16,
+      "goal": "(A - B) ∪ (A ∩ B) = A",
+      "success": false,
+      "timeout": false,
+      "elapsed": 94.7,
+      "depth": 1,
+      "steps": [
+        "lemma \"(A - B) ∪ (A ∩ B) = A\""
+      ]
+    },
+    {
+      "index": 17,
+      "goal": "(A - B) ∩ B = {}",
+      "success": false,
+      "timeout": false,
+      "elapsed": 87.17,
+      "depth": 1,
+      "steps": [
+        "lemma \"(A - B) ∩ B = {}\""
+      ]
+    },
+    {
+      "index": 18,
+      "goal": "{x∈A. P x ∧ Q x} = {x∈A. P x} ∩ {x∈A. Q x}",
+      "success": false,
+      "timeout": false,
+      "elapsed": 102.9,
+      "depth": 1,
+      "steps": [
+        "lemma \"{x∈A. P x ∧ Q x} = {x∈A. P x} ∩ {x∈A. Q x}\""
+      ]
+    },
+    {
+      "index": 19,
+      "goal": "{x∈A. P x ∨ Q x} = {x∈A. P x} ∪ {x∈A. Q x}",
+      "success": false,
+      "timeout": false,
+      "elapsed": 691.29,
+      "depth": 1,
+      "steps": [
+        "lemma \"{x∈A. P x ∨ Q x} = {x∈A. P x} ∪ {x∈A. Q x}\""
+      ]
+    },
+    {
+      "index": 20,
+      "goal": "{x∈A. True} = A",
+      "success": false,
+      "timeout": false,
+      "elapsed": 104.73,
+      "depth": 1,
+      "steps": [
+        "lemma \"{x∈A. True} = A\""
+      ]
+    }
+  ]
+}
