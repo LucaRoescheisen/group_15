@@ -956,6 +956,12 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
             mem.prev_fps.add(_fp)
             mem.prev_blocks.insert(0, _suggestion)
 
+    # Improvement 3 — Alternating temperatures:
+    # Cycle through [default, 0.7] so successive rounds are more diverse.
+    # Using a fixed schedule avoids doubling call count while still escaping
+    # local modes that a single temperature would repeat.
+    _REPAIR_TEMPS = [None, 0.7]
+
     # Build proposals in a few rounds; track failures and surface them to the LLM
     for rr in range(rounds):
         if left() <= 3.0:
@@ -963,11 +969,12 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
         mem.rounds = rr + 1
         why = _why_from_errors(err_texts, block_type)
         timeout = int(min(60, max(8, left() * (0.55 / max(1, rounds - rr)))))
-        
+        _temp = _REPAIR_TEMPS[rr % len(_REPAIR_TEMPS)]  # alternate each round
+
         # Build prior failed blocks text (trim + separators)
         prior_blocks_for_type = list(prior_store.get(block_type, [])) if isinstance(prior_store, dict) else []
         seed_list = [block] + mem.prev_blocks + prior_blocks_for_type
-        
+
         # De-dup while preserving order (by fingerprint)
         seen: Set[str] = set()
         uniq: List[str] = []
@@ -976,19 +983,21 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
             if fpb and fpb not in seen:
                 seen.add(fpb); uniq.append(b)
         seed_list = uniq
-        
+
         if seed_list:
             fails_txt = ("\n---\n".join(_trim_block_for_prompt(b) for b in seed_list[:_MAX_PREV_BLOCKS])) or "(none)"
             _log("repair", "prior_block_failures (LLM input)", fails_txt, trace=trace)
         else:
-            fails_txt = "(none)"        
-        
+            fails_txt = "(none)"
+
         try:
             blk = _propose_block_repair(
-                goal=goal_text, errors=err_texts, ce_hints=ce, 
+                goal=goal_text, errors=err_texts, ce_hints=ce,
                 proof_context=proof_context, block_type=block_type,
                 block_text=block, model=model, timeout_s=timeout, why=why,
-                prior_failed_blocks=fails_txt
+                prior_failed_blocks=fails_txt,
+                temperature=_temp,
+                ih_hints=ih_hints,
             )
         except Exception:
             blk = ""
