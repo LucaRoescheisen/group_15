@@ -265,7 +265,7 @@ def _generate_for_model(
     """
     _log(f"route: {detect_backend_for_model(model)}")
     if model.startswith("gemini:"):
-        return _gemini_cli_generate(system_prompt, user_prompt, model.split(":", 1)[1])
+        return _gemini_generate(system_prompt, user_prompt, model.split(":", 1)[1])
 
     if model.startswith("hf:"):
         repo = model.split(":", 1)[1]
