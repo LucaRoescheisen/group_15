@@ -35,6 +35,8 @@ _WRAPPED_THEOREM_HEAD = re.compile(r"(?mx)\A(?:[ \t]*(?:\(\*.*?\*\)|\<comment\>.
 # Outline-level strategies we want to ban on whole-proof regen
 _OUTLINE_PROOF_LINE   = re.compile(r"(?m)^\s*proof(?:\s*\(([^)]*)\))?\s*$")
 _OUTLINE_BARE         = re.compile(r"(?m)^\s*(?:induction|cases|coinduction)\b.*$")
+# Isabelle "Try this: <tactic> (Xms)" suggestion lines
+_TRY_THIS_RE = re.compile(r"[Tt]ry this:\s*(.+?)(?:\s*\(\d+(?:\.\d+)?(?:ms|s)\))?\s*$", re.MULTILINE)
 
 # ========== Utility Functions ==========
 
