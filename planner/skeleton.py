@@ -485,14 +485,47 @@ def _force_sorry_have_show_bodies(text: str) -> str:
 
     Inline one-liners (e.g. 'show ?case by simp') are left untouched.
     Only multi-line bodies are replaced (i.e. the body starts on the NEXT line).
+
+    Additionally handles orphaned case/next/qed blocks that the LLM emits
+    inside a have body (e.g. an induction proof with sorry + cases).
     """
     _HAVE_SHOW_HEAD = re.compile(r"^\s*(?:have|show|obtain)\b")
     _INLINE_BY = re.compile(r"\s+by\s+\S")   # body already on the head line
-    _STRUCTURAL = re.compile(
+    # Outer boundary: new declaration at same/outer level; does NOT include
+    # case/next/qed which may be proof-internal and should be consumed.
+    _OUTER_BOUNDARY = re.compile(
         r"^\s*(?:have|show|obtain|thus|hence|also|moreover|ultimately|"
-        r"finally|case\b|next\b|qed\b|proof\b|lemma\b|theorem\b|corollary\b)\b"
+        r"finally|lemma\b|theorem\b|corollary\b)\b"
     )
+    # Proof-depth openers/closers for nested proof…qed tracking
+    _PROOF_OPEN = re.compile(r"^\s*proof\b")
+    _QED = re.compile(r"^\s*qed\b")
     _SORRY_ONLY = re.compile(r"^\s*sorry\s*$")
+
+    def _collect_body_through_proofs(lines: List[str], start: int) -> Tuple[List[str], int]:
+        """Collect body lines for a have/show, consuming nested proof…qed blocks.
+
+        Stops at the first _OUTER_BOUNDARY line that is NOT inside a nested
+        proof block.  A lone 'qed' at depth 0 also terminates collection and
+        is NOT included (it belongs to the outer proof).
+        """
+        body: List[str] = []
+        i = start
+        depth = 0  # nested proof/qed depth
+        while i < len(lines):
+            ln = lines[i]
+            if depth == 0 and _OUTER_BOUNDARY.match(ln):
+                break
+            if depth == 0 and _QED.match(ln):
+                # bare qed at depth 0 closes the outer lemma — stop, don't consume
+                break
+            if _PROOF_OPEN.match(ln):
+                depth += 1
+            elif _QED.match(ln):
+                depth -= 1  # depth was > 0
+            body.append(ln)
+            i += 1
+        return body, i
 
     lines = text.splitlines()
     result: List[str] = []
@@ -502,11 +535,7 @@ def _force_sorry_have_show_bodies(text: str) -> str:
         if _HAVE_SHOW_HEAD.match(line) and not _INLINE_BY.search(line):
             result.append(line)
             i += 1
-            # collect the body lines until the next structural keyword
-            body: List[str] = []
-            while i < len(lines) and not _STRUCTURAL.match(lines[i]):
-                body.append(lines[i])
-                i += 1
+            body, i = _collect_body_through_proofs(lines, i)
             # only replace if there's a real body that isn't already just sorry
             non_blank = [l for l in body if l.strip()]
             is_pure_sorry = len(non_blank) == 1 and _SORRY_ONLY.match(non_blank[0])
