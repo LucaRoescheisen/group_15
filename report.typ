@@ -9,8 +9,8 @@
 #show: lncs.with(
   title: "LLM-Guided Isabelle/HOL Theorem Proving with Isar Proof Planning and CEGIS-Style Repair",
   authors: (
-    author("Phong Truong", insts: (inst_princ)),
-    author("Luca Rosechisen", insts: (inst_princ)),
+    author("Sam Li", insts: (inst_princ)),
+    author("Luca Roescheisen", insts: (inst_princ)),
   ),
   abstract: [
     Automated theorem proving in interactive proof assistants such as Isabelle/HOL
