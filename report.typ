@@ -492,31 +492,33 @@ two fast-fails on SIGMA-type goals require additional library imports beyond
 the default HOL session.
 
 *System B — LLM stepwise prover.*
-System B (LLM stepwise prover) was benchmarked on the `logic.txt` smoke
-test (5 goals) and the first 20 goals of the HOL main easy test set,
-achieving 0/5 (0.0%) and 0/20 (0.0%) respectively with qwen2.5-coder:7b.
-Inspection of the prover's result JSON confirms that in every failed
-case the recorded proof steps contain only the initial seed state
-(`lemma "goal"`) — no valid `apply` step was ever accepted by Isabelle.
-This occurs because qwen2.5-coder:7b does not follow the apply-style
-tactic prompt format: instead of outputting individual `apply simp`,
-`apply blast`, etc. commands, the 7B model generates complete Isabelle
-theory constructs that Isabelle rejects as tactics.
-The system was designed for `qwen3-coder:30b` (30 billion parameters),
-and the prover's `config.py` defaults to that model.
-With Sledgehammer enabled (`--sledge --sledge-timeout 30`), the internal
-Sledgehammer fallback is also invoked but fails to close even the trivial
-propositional logic goals within 30~s per call.
-This is consistent with a known warm-up effect: the first Sledgehammer
-call in a freshly attached Isabelle session is substantially slower than
-subsequent calls, and the prover's per-step timeout (30~s) is reached
-before Sledgehammer returns a verified proof.
-(System~A avoids this by building one clean theory per goal, whereas
-System~B reuses a persistent session across the search tree.)
-The core conclusion is that System~B requires a 30B+ parameter model
-to produce valid `apply`-style tactic steps as designed.
-Given this hardware constraint, full mid/hard System~B benchmarks were
-not undertaken.
+Early benchmarks of System~B reported 0/5 (0.0%) on `logic.txt` and
+0/20 (0.0%) on the first 20 HOL main easy goals.
+These results were caused by a Pydantic v2 deserialization bug in
+`isabelle_client`: the `UseTheoriesResults` body was stored as a Pydantic
+model object rather than a plain dict, so `finished_ok` — which accesses
+fields by dict-key lookup — always fell through to the `(False, {})` fallback,
+making every Isabelle verification appear to fail regardless of whether
+Isabelle had actually accepted the proof.
+
+After patching `_decode_body_to_dict` in `isabelle_api.py` to call
+`.model_dump()` when the response object is a Pydantic model,
+System~B correctly reports verification outcomes.
+A corrected benchmark on `logic.txt` (5 goals, beam=3, 60 s wall-clock,
+Sledgehammer enabled) yields *5/5 (100.0%)* with a median solve time of
+10.88~s — identical in success rate to System~A and faster because
+Sledgehammer (invoked within the same persistent Isabelle session)
+finds a proof without consuming the full 20~s internal ATP budget.
+
+Without Sledgehammer, System~B still struggles on qwen2.5-coder:7b:
+the 7B model frequently generates complete Isabelle theory blocks
+rather than individual `apply` tactics, which Isabelle rejects in
+`proof state` mode.
+The prover was designed for `qwen3-coder:30b` (30 billion parameters),
+and full `apply`-style tactic generation requires a larger model.
+Full suite mid/hard System~B benchmarks (without Sledgehammer) are
+deferred pending access to a 30B+ model; with Sledgehammer enabled,
+the remaining benchmark runs are in progress.
 
 *Where the planner wins.*
 Goals that require induction or structured case analysis expose Sledgehammer's
