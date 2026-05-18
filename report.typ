@@ -704,16 +704,57 @@ The source code for this work is available at: https://github.com/LucaRoescheise
 = Appendix: Generative AI Usage
 
 The following generative AI tools were used during this project.
-No AI was used for writing the report text.
+All report text was written by the authors; AI tools were used solely for
+coding assistance, debugging, and code review as described below.
 
-*Tool:* [e.g., Claude Code / ChatGPT 4o]
+*Tool:* Claude Code (claude-sonnet-4-5, Anthropic), accessed via the Claude Code CLI.
 
-*Query 1:* [Paste your query here]
+*Query 1:* Debugging the `isabelle_client` Pydantic v2 deserialization issue —
+"The `finished_ok` function always returns `(False, {})` even when Isabelle
+accepts the proof. Can you identify why the response body is not being decoded
+correctly?"
 
-*Response summary:* [Summarise what the AI returned]
+*Response summary:* Claude identified that the `use_theories` response body was
+being stored as a Pydantic `UseTheoriesResults` model object rather than a plain
+`dict`, causing all dict-key lookups to silently fail. The fix was to add
+`.model_dump()` / `vars()` fallback calls in `_decode_body_to_dict` inside
+`isabelle_api.py`, restoring correct proof verification across all three systems.
 
 ---
 
-*Query 2:* [Paste your query here]
+*Query 2:* Diagnosing and fixing the budget-starvation and indentation bugs in
+`_fill_one_hole` — "The hole filler always reports 'Fill made no progress' even
+on trivial goals. The sledgehammer timeout is 10 s but the total per-hole budget
+is only 18 s, and the inserted tactic has wrong indentation."
 
-*Response summary:* [Summarise what the AI returned]
+*Response summary:* Claude identified two distinct bugs: (1) `sledge_timeout` was
+fixed at 10 s regardless of `per_hole_timeout`, leaving zero time for the
+finisher-verification loop; fixed by capping `sledge_timeout` at
+`per_hole_timeout // 3`. (2) The generic finisher insertion used a hardcoded
+`"\n  "` prefix instead of preserving the whitespace already before `sorry`; fixed
+by extracting `indent = full_text[line_start:s]` and using it in the replacement.
+
+---
+
+*Query 3:* Merging teammate contributions — reviewing `driver.py` changes from the
+remote `test` branch and resolving merge conflicts.
+
+*Response summary:* Claude identified and described Luca Roescheisen's additions
+to `driver.py` (fast-path on `res.get("success")`, `_fill_one_hole_finisher_only`,
+and apply-inside-have/show retry logic), confirmed no semantic conflicts with
+Sam Li's fixes in `isabelle_api.py`, `goals.py`, and `skeleton.py`, and guided
+the `git merge` workflow, resolving only runtime log file conflicts by discarding
+the stashed log changes.
+
+---
+
+*Query 4:* Writing and debugging `test_multiholes.py` — "Test the multi-hole
+filling pipeline directly without LLM outline generation, using manually
+constructed induction outlines."
+
+*Response summary:* Claude identified a stale-span bug in the test loop
+(Python evaluates the `find_sorry_spans(full)` iterator once at loop entry, so
+span positions become stale after the first hole is filled) and rewrote both
+test loops to use a `while True: spans = find_sorry_spans(full)` pattern that
+recomputes positions after each fill. Both test cases (2-hole `map f` induction
+and single-have `length` proof) passed after the fix.
