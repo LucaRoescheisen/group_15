@@ -85,17 +85,66 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
         do_variants=False, variant_timeout=6, variant_tries=24,
         enable_reranker=True, initial_state_hint=state_block,
     )
-    
-    steps = [str(s) for s in res.get("steps", [])]
+
+    # prove_goal returns steps as the full list including the lemma line, e.g.:
+    #   ['lemma "..."', 'apply induction', 'by simp']
+    # We only want the proof body (everything after the lemma line).
+    all_steps = [str(s) for s in res.get("steps", [])]
+    proof_body = [s for s in all_steps if not s.strip().startswith("lemma ")]
+
+    # Fast path: prove_goal succeeded — extract and insert directly.
+    if res.get("success") and proof_body:
+        applies = [s for s in proof_body if s.startswith("apply")]
+        fin = next((s for s in proof_body if s.startswith("by ") or s.strip() == "done"), "")
+        if fin:
+            script_lines = applies + [fin]
+            s, e = hole_span
+
+            if not applies:
+                # Pure finisher (no applies): the sorry sits inside proof...qed.
+                # Inserting 'by X' inside proof...qed is illegal in Isabelle.
+                # Instead, replace the entire enclosing proof...sorry...qed block
+                # with just the finisher on the lemma line.
+                # Find the enclosing proof...qed around the sorry.
+                proof_start = full_text.rfind("\nproof", 0, s)
+                if proof_start == -1:
+                    proof_start = full_text.rfind("proof", 0, s)
+                qed_end = full_text.find("qed", e)
+                if proof_start != -1 and qed_end != -1:
+                    qed_end += len("qed")
+                    new_text = full_text[:proof_start] + "\n  " + fin + full_text[qed_end:]
+                    if _verify_full_proof(isabelle, session, new_text):
+                        return new_text, True, fin
+                    if trace:
+                        print(f"[fill] proof..qed replacement failed. Trying 'show ?thesis {fin}'")
+                    # Fallback: keep proof...qed but use 'show ?thesis by ...'
+                    show_line = f"show ?thesis\n    {fin}"
+                    insert = "\n  " + show_line + "\n"
+                    new_text2 = full_text[:s] + insert + full_text[e:]
+                    if _verify_full_proof(isabelle, session, new_text2):
+                        return new_text2, True, show_line
+                    if trace:
+                        print(f"[fill] show ?thesis fallback also failed.\n{new_text2}")
+            else:
+                # Has apply steps: insert normally inside proof...qed
+                insert = "\n  " + "\n  ".join(script_lines) + "\n"
+                new_text = full_text[:s] + insert + full_text[e:]
+                if _verify_full_proof(isabelle, session, new_text):
+                    return new_text, True, "\n".join(script_lines)
+                if trace:
+                    print(f"[fill] prove_goal succeeded but verify failed. script={script_lines}")
+                    print(f"[fill] new_text being verified:\n{new_text}")
+        # apply-only or verify mismatch: fall through to generic path below
+
+    # Generic extraction path.
+    steps = proof_body
 
     # Fallbacks: some backends return finishers/applies in separate keys
     fin_candidates = []
-    # singular fields
     for k in ("finisher", "finish", "final"):
         v = res.get(k)
         if isinstance(v, str):
             fin_candidates.append(v)
-    # list fields
     for k in ("finishers", "sledge_finishers"):
         vs = res.get(k)
         if isinstance(vs, (list, tuple)):
@@ -108,7 +157,7 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
 
     applies = [s for s in steps if s.startswith("apply")]
     if applies_from_keys:
-        applies = applies or applies_from_keys  # prefer explicit list if steps were empty
+        applies = applies or applies_from_keys
 
     fin = next((s for s in steps if s.startswith("by ") or s.strip() == "done"), "")
     if not fin:
@@ -164,6 +213,79 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
             return probe_text, False, "\n".join(dedup)
     
     return full_text, False, "no-tactics"
+
+
+def _fill_one_hole_finisher_only(
+    isabelle, session: str, full_text: str, hole_span: Tuple[int, int],
+    goal_text: str, model: Optional[str], per_hole_timeout: int, *, trace: bool = False,
+) -> Tuple[str, bool, str]:
+    """Re-attempt a hole that previously yielded only 'apply' steps.
+
+    Restricts the prover to finisher-producing strategies only:
+    - Sledgehammer (always produces 'by (...)')
+    - Depth-1 beam (forces the LLM to emit a closing tactic immediately)
+
+    Never inserts bare 'apply' steps, so it is safe inside have/show blocks.
+    Returns (new_text, success, script) with the same contract as _fill_one_hole.
+    """
+    state_block = _print_state_before_hole(isabelle, session, full_text, hole_span, trace)
+    eff_goal = _effective_goal_from_state(state_block, goal_text, full_text, hole_span, trace)
+
+    res = prove_goal(
+        isabelle, session, eff_goal,
+        model_name_or_ensemble=model,
+        beam_w=1,        # single beam — forces a finisher on the first attempt
+        max_depth=1,     # depth-1 means: emit one closing step, no applies allowed
+        hint_lemmas=6,
+        timeout=per_hole_timeout,
+        models=None, save_dir=None,
+        use_sledge=True, sledge_timeout=min(per_hole_timeout - 2, 20),
+        sledge_every=1,
+        trace=trace, use_color=False,
+        use_qc=False, qc_timeout=2, qc_every=1,
+        use_np=False, np_timeout=5, np_every=2,
+        facts_limit=8, do_minimize=False, minimize_timeout=8,
+        do_variants=False, variant_timeout=6, variant_tries=0,
+        enable_reranker=False,   # reranker not useful at depth-1
+        initial_state_hint=state_block,
+    )
+
+    steps = [str(s) for s in res.get("steps", [])]
+
+    # Collect finisher candidates only — never accept bare applies
+    fin = next(
+        (s for s in steps if s.startswith("by ") or s.strip() == "done"), ""
+    )
+    if not fin:
+        for k in ("finisher", "finish", "final"):
+            v = res.get(k)
+            if isinstance(v, str) and (v.startswith("by ") or v.strip() == "done"):
+                fin = v
+                break
+    if not fin:
+        for k in ("finishers", "sledge_finishers"):
+            vs = res.get(k, [])
+            for x in (vs or []):
+                if isinstance(x, str) and (x.startswith("by ") or x.strip() == "done"):
+                    fin = x
+                    break
+            if fin:
+                break
+
+    if not fin:
+        return full_text, False, "finisher-only-no-result"
+
+    insert = "\n  " + fin + "\n"
+    s, e = hole_span
+    new_text = full_text[:s] + insert + full_text[e:]
+
+    if _verify_full_proof(isabelle, session, new_text):
+        return new_text, True, fin
+
+    return full_text, False, "finisher-only-unverified"
+
+
+
 
 
 def _insert_above_hole_keep_sorry(text: str, hole: Tuple[int, int], lines_to_insert: List[str]) -> str:
@@ -579,11 +701,44 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                         focused_hole_key = _hole_fingerprint(full, near) if near else None
                         continue
                     else:
-                        if trace:
-                            print("[fill] Could not open sorries. Escalating to repair stage 1...")
-                        repair_progress[hole_key] = 1
-                        focused_hole_key = hole_key
-                        start_stage = 1
+                    # --- WIP 1 fix: apply-only inside have/show ---
+                    # The prover found apply steps but no finisher, and the hole
+                    # sits inside a have/show block where bare applies are illegal.
+                    # Before entering generic CEGIS repair, try a finisher-only
+                    # re-probe (sledgehammer + depth-1 beam).
+                        if script == "apply-inside-have/show":
+                            if trace:
+                                print("[fill] apply-inside-have/show: attempting finisher-only retry before CEGIS...")
+                            try:
+                                fin_budget = max(8, int(left_s() * 0.25))
+                                full2, ok2, script2 = _fill_one_hole_finisher_only(
+                                    isa, session, full, span, goal_text, model,
+                                    per_hole_timeout=fin_budget, trace=trace,
+                                )
+                            except (TimeoutError, _FuturesTimeout, ValueError) as ex:
+                                _restart_isabelle("fill_finisher_only", ex)
+                                full2, ok2, script2 = full, False, "finisher-only-exception"
+                            except Exception as ex:
+                                if trace:
+                                    print(f"[fill] finisher-only retry crashed: {type(ex).__name__}: {ex}")
+                                full2, ok2, script2 = full, False, "finisher-only-exception"
+    
+                            if ok2 and full2 != full:
+                                full = full2
+                                fills.append(script2)
+                                repair_progress.pop(hole_key, None)
+                                focused_hole_key = None
+                                if trace:
+                                    print(f"[fill] Finisher-only retry succeeded: {script2!r}")
+                                continue
+                            else:
+                                if trace:
+                                    print(f"[fill] Finisher-only retry failed ({script2}). Escalating to repair stage 1...")
+
+                    # Generic escalation path (covers all other failure reasons too)
+                    repair_progress[hole_key] = 1
+                    focused_hole_key = hole_key
+                    start_stage = 1
                 else:
                     if trace:
                         print("[fill] Fill made no progress. Escalating to repair stage 1...")
