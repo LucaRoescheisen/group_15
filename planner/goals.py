@@ -290,7 +290,14 @@ def _extract_print_state_from_responses(resps: List) -> str:
         if isinstance(body, bytes):
             body = body.decode(errors="replace")
         try:
-            data = json.loads(body) if isinstance(body, str) and body.strip().startswith("{") else body
+            if isinstance(body, str) and body.strip().startswith("{"):
+                data = json.loads(body)
+            elif hasattr(body, "model_dump"):
+                data = body.model_dump()
+            elif hasattr(body, "__dict__"):
+                data = vars(body)
+            else:
+                data = body
             if not isinstance(data, dict):
                 continue
         except (json.JSONDecodeError, TypeError):
