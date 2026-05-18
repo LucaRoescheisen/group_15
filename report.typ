@@ -23,7 +23,10 @@
     prover to fill each hole.
     When filling fails, a staged repair procedure — targeting first the local
     have/show block, then the enclosing subproof, and finally regenerating the
-    whole proof — is triggered.
+    whole proof — is triggered, augmented with five improvements: smarter block
+    deduplication, error-category–specific LLM guidance, a complete ban-list for
+    whole-proof regeneration, direct application of Isabelle's own `Try this:`
+    suggestions, and stage-cascade continuation after partial repairs.
     We evaluate our approach against a Sledgehammer-only baseline and a standalone
     LLM stepwise prover across three difficulty tiers drawn from the HOL main
     goal corpus @isabellm2026repo and the mini-F2F benchmark @zheng2022minif2f.
