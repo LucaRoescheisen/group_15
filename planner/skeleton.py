@@ -581,6 +581,12 @@ def _force_sorry_have_show_bodies(text: str) -> str:
 
 
 def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
+    # Early rejection: if the LLM emitted placeholder variables (A=B, B=C, ...=D),
+    # discard the whole outline and fall back to a minimal sorry skeleton so the
+    # hole-filler can attempt a direct proof via Sledgehammer.
+    if _is_placeholder_outline(text):
+        return f'lemma "{goal}"\nproof -\n  sorry\nqed\n'
+
     text = _ensure_lemma_header(text, goal)
     # Normalize ellipsis first (avoid Unicode / spaced form)
     text = _normalize_calculation_ellipsis(text)
