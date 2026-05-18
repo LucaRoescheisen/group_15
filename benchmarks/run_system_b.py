@@ -4,7 +4,7 @@ benchmarks/run_system_b.py — System B benchmark runner
 Runs the LLM stepwise prover (prover.prover.prove_goal) on a dataset file
 without modifying any original repo code.
 
-Usage:
+Usage (Windows PowerShell):
     $env:ISABELLE_INST_DIR = "C:\\Program Files\\Isabelle2025-2"
     $env:PYTHONUTF8      = "1"
     $env:OLLAMA_MODEL    = "qwen2.5-coder:7b"
@@ -13,6 +13,15 @@ Usage:
         --file datasets/hol_main_easy_goals_test.txt `
         --timeout 120 `
         --sledge --sledge-timeout 20
+
+Usage (Linux/macOS):
+    OLLAMA_MODEL=qwen2.5-coder:7b \\
+    python benchmarks/run_system_b.py \\
+        --file datasets/hol_main_easy_goals_test.txt \\
+        --timeout 120 \\
+        --sledge --sledge-timeout 20
+
+    Note: ensure `isabelle` is on your PATH (e.g. export PATH=$PATH:/path/to/Isabelle2025-2/bin)
 
 Results are printed to stdout and saved to benchmarks/results/.
 """
@@ -32,7 +41,11 @@ warnings.filterwarnings("ignore", category=ResourceWarning)
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
-os.environ.setdefault("ISABELLE_INST_DIR", r"C:\Program Files\Isabelle2025-2")
+# On Windows, isabelle_client needs ISABELLE_INST_DIR to locate the Cygwin
+# Isabelle launcher.  On Linux/macOS it uses `isabelle` from PATH directly,
+# so we only set the default here when actually running on Windows.
+if sys.platform == "win32":
+    os.environ.setdefault("ISABELLE_INST_DIR", r"C:\Program Files\Isabelle2025-2")
 os.environ.setdefault("PYTHONUTF8", "1")
 
 # ── repo imports (read-only — no files modified) ───────────────────────────
