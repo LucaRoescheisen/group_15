@@ -33,7 +33,8 @@ def detect_backend_for_model(model: str) -> str:
     This function does not perform any network calls.
     """
     if model.startswith("gemini:"):
-        return f"gemini-cli model={model.split(':',1)[1]}"
+        backend = "gemini-rest" if os.getenv("GEMINI_API_KEY") else "gemini-cli"
+        return f"{backend} model={model.split(':',1)[1]}"
     if model.startswith("hf:"):
         repo = model.split(":", 1)[1]
         force_local = os.getenv("HF_MODE", "").strip().lower() == "local"
