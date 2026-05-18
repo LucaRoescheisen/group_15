@@ -423,11 +423,7 @@ python -m planner.cli --model "gemini:gemini-3-flash-preview" \
 
 Benchmarking a file of lemmas/proof goals
 ```bash
-python -m planner.experiments bench \  
-  --file datasets/lists.txt \                                 
-  --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
-  --timeout 120 --strict-no-sorry --verify \
-  --model "qwen3-coder:30b" --shuffle --seed 42
+python -m planner.experiments bench --file datasets/lists.txt --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" --timeout 120 --strict-no-sorry --verify --model "qwen3-coder:30b" --shuffle --seed 42
 ```
 
 Regression testing and save a baseline
