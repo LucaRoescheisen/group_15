@@ -322,8 +322,14 @@ enters the staged repair loop in `repair.py` (`try_cegis_repairs`).
 The system locates the smallest enclosing `have`/`show`/`obtain` block around
 the earliest failure point (determined by `_earliest_failure_anchor`, which runs
 Isabelle and parses the first error line to avoid targeting symptoms of a deeper bug).
-The LLM is prompted to regenerate only that block.
-A "Try this:" pre-pass fires first: Isabelle sometimes outputs `Try this: by (simp add: ...) (Xms)` from Sledgehammer or `solve_direct`; `_extract_try_this_suggestions` extracts up to two such suggestions and substitutes each into the failing tactic line before any LLM call, saving token budget when Isabelle's own ATP already found a fix.
+Before any LLM call, two deterministic pre-passes fire.
+First, a proactive Sledgehammer pass (`_proactive_sledgehammer_suggestions`) replaces
+the first `sorry` in the block with `by sledgehammer`, submits the modified theory,
+and collects any `Try this:` suggestions the ATP returns; these are tried immediately,
+bypassing the LLM entirely when the ATP finds a solution.
+Second, a passive `Try this:` extraction (`_extract_try_this_suggestions`) harvests
+suggestions that Isabelle's `solve_direct` already embedded in prior error messages.
+Only if both pre-passes fail is the LLM invoked to regenerate the block.
 
 *Stage 2 — case block and subproof.*
 If Stage~1 makes no progress or leaves the proof unverified, Stage~2a regenerates
@@ -341,7 +347,7 @@ A cumulative ban-list (`failed_outlines` in `driver.py`, passed via
 `prior_outline_texts`) ensures that each Stage~3 call receives all previously
 failed proof structures and avoids repeating them.
 
-*Five improvements to the baseline.*
+*Nine improvements to the baseline.*
 
 + *Smarter block deduplication* (`_fingerprint_block`): normalises ATP synonyms
   (`auto`/`blast`/`fastforce`/`clarsimp` → `ATP`), sorts `simp add:` lemma lists,
@@ -357,12 +363,39 @@ failed proof structures and avoids repeating them.
   and passes the full list to `regenerate_whole_proof`, preventing repetition
   across multiple Stage~3 invocations.
 
-+ *"Try this" pre-pass*: extracts Isabelle's own Sledgehammer/`solve_direct`
-  suggestions before any LLM call, allowing many repairs to complete
-  without spending any LLM token budget.
++ *Passive "Try this" pre-pass*: extracts Isabelle's own Sledgehammer/`solve_direct`
+  suggestions from existing error messages before any LLM call, allowing many
+  repairs to complete without spending any LLM token budget.
 
 + *Stage-cascade continuation*: propagates partial repairs from Stage~1 into
   Stage~2 rather than returning `False` immediately on unverified changes.
+
++ *Proactive Sledgehammer at Stage~1 entry* (`_proactive_sledgehammer_suggestions`):
+  replaces the first `sorry` in the failing block with `by sledgehammer` and submits
+  the modified theory to Isabelle, collecting `Try this:` ATP suggestions before any
+  LLM call. This is an active complement to the passive pre-pass: whereas the passive
+  pass collects suggestions that appeared in prior error output, the proactive pass
+  solicits new ATP suggestions for the current subgoal state, catching cases where
+  Sledgehammer was never previously invoked on that exact goal.
+
++ *Deterministic `arbitrary:` repair* (`_maybe_fix_arbitrary`): detects Isabelle's
+  `locally fixed variable X` error and rewrites `proof (induction xs)` to
+  `proof (induction xs arbitrary: X)` in a single string substitution — no LLM call,
+  no Isabelle round-trip beyond a verification check. Applied before Stage~1;
+  handles the most common induction failure mode for goals involving two list or
+  natural-number variables.
+
++ *Alternating-temperature LLM sampling*: repair rounds cycle through temperatures
+  `[default, 0.7]`, so successive LLM calls explore different regions of the output
+  distribution without increasing the total number of calls. Round 0 uses the
+  configured default temperature; round 1 uses $T = 0.7$; round 2 returns to the
+  default, and so on.
+
++ *Induction hypothesis injection* (`_extract_induction_hyps`): parses lines of the
+  form `Cons.IH : P xs` from the Isabelle proof state and appends them as a dedicated
+  `INDUCTION_HYPOTHESES` section in the LLM repair prompt. The LLM can then directly
+  reference the available induction hypotheses in `using` clauses rather than
+  inferring their names from context, reducing hallucinated fact references.
 
 // ============================================================
 // 4. IMPLEMENTATION AND EXPERIMENTS
