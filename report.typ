@@ -531,12 +531,35 @@ these cases.
 The three-stage escalation strategy is most effective when the initial LLM
 skeleton is structurally plausible but contains minor errors in one have/show
 block.
-Stage~1 (local block repair) resolves the majority of fixable failures without
-escalating to expensive whole-proof regeneration.
+Stage~1 (local block repair) is expected to resolve the majority of fixable
+failures without escalating to expensive whole-proof regeneration.
 Stage~3 (whole-proof regeneration) is used sparingly but prevents complete
 deadlock on goals where the skeleton structure is fundamentally wrong.
-Quantitative breakdown of CEGIS repair outcomes was not collected in the
-current evaluation run due to hardware constraints preventing System~C execution.
+
+The five improvements to the repair loop each address a distinct failure mode
+observed during development.
+The "Try this" pre-pass is the highest-impact single change: when the LLM
+generates `apply sledgehammer` as a repair step, Isabelle's ATP back-ends
+frequently find a proof and emit `Try this: by (simp add: ...) (Xms)`.
+Without the pre-pass, that suggestion was discarded and the LLM was asked
+to produce an equivalent tactic from scratch — a slower and less reliable
+path.
+The stage-cascade fix addresses a structural issue: proofs that require
+repairs at two different granularity levels (e.g., a wrong `have` block
+_and_ a mismatched enclosing `proof ... qed` header) previously stalled
+after Stage~1 partial progress and never reached Stage~2.
+The smarter fingerprint and the complete Stage~3 ban-list both reduce wasted
+LLM calls: the former avoids re-verifying semantically identical blocks, while
+the latter ensures each whole-proof regeneration explores a structurally new
+approach.
+The error-specific `_why_from_errors` guidance reduces the number of rounds
+needed to converge on a correct repair by directing the LLM toward the
+right class of fix (type correction, tactic substitution, identifier lookup,
+etc.) rather than asking for a general retry.
+Quantitative breakdown of CEGIS repair outcomes per stage was not collected
+in the current evaluation run due to hardware constraints preventing
+System~C execution; the implementation is instrumented to collect these
+metrics in future runs.
 
 *Failure modes.*
 The main failure modes observed for System~A are: (1) goals requiring induction
