@@ -409,6 +409,46 @@ def _maybe_proof_dash(text: str) -> str:
         return BARE_PROOF_RE.sub("proof -", text, count=1)
     return text
 
+def _strip_tactics_after_sorry(text: str) -> str:
+    """Remove tactic lines that follow a bare 'sorry' in a have/show block.
+
+    Small LLMs sometimes emit invalid continuations after sorry, e.g.:
+        have f: "P"
+          sorry           <- valid: closes the have block
+          unfolding X     <- INVALID: sorry already closed it
+          by simp         <- INVALID
+    Stripping these makes the skeleton parseable by Isabelle.
+    The next structural keyword (have/show/case/next/qed/proof) ends the strip.
+    """
+    _SORRY_BARE = re.compile(r"^\s*sorry\s*$")
+    _STRUCTURAL = re.compile(
+        r"^\s*(?:have|show|obtain|thus|hence|also|moreover|ultimately|"
+        r"finally|case\b|next\b|qed\b|proof\b|lemma\b|theorem\b|corollary\b)\b"
+    )
+    _TACTIC_CONT = re.compile(
+        r"^\s*(?:unfolding|folding|using|apply\b|simp\b|auto\b|blast\b|"
+        r"fastforce\b|clarsimp\b|arith\b|omega\b|linarith\b|by\b|done\b)\b"
+    )
+    lines = text.splitlines()
+    result: List[str] = []
+    after_sorry = False
+    for line in lines:
+        if _SORRY_BARE.match(line):
+            result.append(line)
+            after_sorry = True
+        elif after_sorry:
+            if _STRUCTURAL.match(line):
+                after_sorry = False
+                result.append(line)
+            elif _TACTIC_CONT.match(line):
+                pass  # strip: invalid continuation after sorry
+            else:
+                result.append(line)  # blank lines / comments: keep, stay in strip mode
+        else:
+            result.append(line)
+    return "\n".join(result)
+
+
 def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
     text = _ensure_lemma_header(text, goal)
     # Normalize ellipsis first (avoid Unicode / spaced form)
