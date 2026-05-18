@@ -778,6 +778,31 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
     rounds = 3 if left() >= 18.0 else 2 if left() >= 10.0 else 1
     mem = _RepairMemory()
 
+    # Pre-LLM pass: try any "Try this: <tactic>" suggestions Isabelle gave us.
+    # These come from sledgehammer or solve_direct and are almost always correct,
+    # so we try them before spending LLM budget.
+    _try_suggestions = _extract_try_this_suggestions(err_texts)
+    block_lines_for_tt = block.splitlines()
+    for _suggestion in _try_suggestions[:2]:
+        if left() <= 3.0:
+            break
+        _patched = _apply_try_this_to_block(_suggestion, block_lines_for_tt, lines, start, end)
+        if _patched is None or _patched == current_text:
+            continue
+        if trace:
+            print("[repair] Trying 'Try this' suggestion: " + repr(_suggestion))
+        _thy = build_theory(_patched.splitlines(), add_print_state=False, end_with=None)
+        _ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, _thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
+        if _ok:
+            if trace:
+                print("[repair] 'Try this' suggestion verified — skipping LLM")
+            return _patched
+        # Record as failed so the LLM loop won't repeat it
+        _fp = _fingerprint_block(_suggestion)
+        if _fp and _fp not in mem.prev_fps:
+            mem.prev_fps.add(_fp)
+            mem.prev_blocks.insert(0, _suggestion)
+
     # Build proposals in a few rounds; track failures and surface them to the LLM
     for rr in range(rounds):
         if left() <= 3.0:
