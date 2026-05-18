@@ -346,7 +346,8 @@ def _hf_generate(prompt: str, model_id: str, timeout_s: int, *, temperature: Opt
     token = os.getenv("HUGGINGFACE_API_TOKEN")
     if not token:
         raise RuntimeError("HUGGINGFACE_API_TOKEN is not set")
-    payload = {"inputs": prompt, "parameters": {"temperature": OLLAMA_TEMP, "top_p": OLLAMA_TOP_P, "max_new_tokens": OLLAMA_NUM_PREDICT, "return_full_text": False}, "options": {"wait_for_model": True}}
+    temp_val = temperature if temperature is not None else OLLAMA_TEMP
+    payload = {"inputs": prompt, "parameters": {"temperature": temp_val, "top_p": OLLAMA_TOP_P, "max_new_tokens": OLLAMA_NUM_PREDICT, "return_full_text": False}, "options": {"wait_for_model": True}}
     resp = _SESSION.post(f"https://api-inference.huggingface.co/models/{model_id}", headers={"Authorization": f"Bearer {token}"}, json=payload, timeout=timeout_s)
     resp.raise_for_status()
     data = resp.json()
