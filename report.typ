@@ -388,12 +388,12 @@ The three systems are invoked as:
     align: (left, center, center, center, center),
     [*Dataset (goals)*], [*A: Sledge*], [*B: Prover*], [*C: Planner*], [*Winner*],
     [lists/nat/sets/logic (40)], [85.0%], [—], [—], [A],
-    [HOL main easy test (20†)],  [96.0%], [0.0%], [—], [A],
+    [HOL main easy test (100)],  [96.0%], [—], [—], [A],
     [HOL main mid test (100)],   [74.0%], [—], [—], [A],
     [HOL main hard test (100)],  [80.0%], [—], [—], [A],
-    [logic.txt (5, smoke)],      [100.0%],[0.0%], [—], [A],
+    [logic.txt (5, smoke)],      [100.0%],[100.0%], [—], [A/B],
   ),
-  caption: [Success rates (% goals proved). A = Sledgehammer-only baseline (20 s Sledgehammer / 90 s wall-clock timeout per goal), B = LLM stepwise prover (qwen2.5-coder:7b, 120 s / 30 s Sledgehammer timeout), C = LLM planner with fill and CEGIS repair (ours). † System B was run on the first 20 of 100 easy test goals; 0/20 confirmed. Full mid/hard benchmarks not attempted due to model incompatibility (see Discussion).]
+  caption: [Success rates (% goals proved). A = Sledgehammer-only baseline (20 s Sledgehammer / 90 s wall-clock timeout per goal), B = LLM stepwise prover (qwen2.5-coder:7b, beam=3, 60 s wall-clock, Sledgehammer enabled), C = LLM planner with fill and CEGIS repair (ours). System B results previously showed 0% due to a Pydantic v2 deserialization bug in `isabelle_client` that caused all Isabelle verification responses to be misread as failures; after the fix, System B correctly achieves 100% on logic. System B full-suite and System C benchmarks pending (see Discussion).]
 )
 
 #figure(
