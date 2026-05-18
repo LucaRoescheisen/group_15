@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -92,20 +92,20 @@ def _fingerprint_block(text: str) -> str:
     # Normalises: whitespace, quote variants, ATP synonyms,
     # simp add: lemma ordering, and generated fact labels (f1/f2 -> fN).
     if not text:
-        return “”
-    t = re.sub(r”\s+”, “ “, text.strip())
+        return ""
+    t = re.sub(r"\s+", " ", text.strip())
     # Normalize backticks and curly/smart quotes to plain ASCII
-    t = t.replace(“`”, “”)
-    t = t.replace(““”, ‘”’).replace(“””, ‘”’)
-    t = t.replace(“‘”, “’”).replace(“’”, “’”)
-    # Treat common ATP synonyms as identical so “by auto” == “by blast”
-    t = re.sub(r”\bby\s+(auto|blast|fastforce|clarsimp)\b”, “by ATP”, t)
-    # Sort simp add: lemma lists so ordering differences don’t bypass dedup
+    t = t.replace("`", "")
+    t = t.replace(chr(0x201c), chr(0x22)).replace(chr(0x201d), chr(0x22))
+    t = t.replace(chr(0x2018), chr(0x27)).replace(chr(0x2019), chr(0x27))
+    # Treat common ATP synonyms as identical so "by auto" == "by blast"
+    t = re.sub(r"\bby\s+(auto|blast|fastforce|clarsimp)\b", "by ATP", t)
+    # Sort simp add: lemma lists so ordering differences don't bypass dedup
     def _sort_simp(m: re.Match) -> str:
-        return “simp add: “ + “ “.join(sorted(m.group(1).split()))
-    t = re.sub(r”\bsimp\s+add:\s+([^\n\]()]+)”, _sort_simp, t)
+        return "simp add: " + " ".join(sorted(m.group(1).split()))
+    t = re.sub(r"\bsimp\s+add:\s+([^\n\]()]+)", _sort_simp, t)
     # Normalise generated fact labels so f1/f2/h3 renames look identical
-    t = re.sub(r”\b[fhg]\d+\b”, “fN”, t)
+    t = re.sub(r"\b[fhg]\d+\b", "fN", t)
     return t
 
 def _trim_block_for_prompt(text: str, max_chars: int = 800) -> str:
