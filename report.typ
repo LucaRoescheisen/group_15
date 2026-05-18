@@ -188,13 +188,17 @@ placeholders before the next Isabelle check.
 A global timeout stops the loop to prevent runaway computation.
 
 *WIP 2 fixes — CEGIS repair loop improvements.*
-We address three specific weaknesses in the original implementation:
+We identify and address five weaknesses in the original `repair.py` implementation.
 
-- *Stage escalation too aggressive:* the original caps of 2 and 3 attempts per stage caused premature escalation to expensive whole-proof rewrites. We increase these caps and add a time-remaining check so escalation only happens when the local budget is exhausted, not after a fixed attempt count.
+- *Weak block deduplication.* The original `_fingerprint_block` collapsed whitespace only, so `by auto` and `by blast` were treated as distinct blocks and both attempted even though they are semantically equivalent. The improved fingerprint normalises all common ATP synonyms (`auto`, `blast`, `fastforce`, `clarsimp`) to a single token, sorts the lemma list in every `simp add:` clause, canonicalises generated fact labels (`h1`, `f2`, `g3` all map to `fN`), and strips Unicode smart quotes. This prevents the LLM from wasting attempts on structurally identical candidates.
 
-- *Stage 3 outline repetition:* after a whole-proof regeneration fails, the original code could re-propose the same outline structure. We maintain a fingerprint ban-list across regeneration rounds so each new outline is structurally distinct from all prior failed ones.
+- *Generic repair guidance.* The original loop passed the same generic failure message to the LLM on every repair round regardless of what Isabelle actually reported. The new `_why_from_errors` helper classifies the error text into eight categories — type clash, tactic failure, unknown identifier, unification failure, no subgoals remaining, constructor clash, locally fixed variable, and stale `sorry` — and forwards a targeted one-sentence diagnosis with each LLM call. This gives the model a concrete signal about the kind of fix required, rather than a generic retry prompt.
 
-- *Partial progress discarded:* when a repair changes the proof but Isabelle still rejects it, we now open minimal `sorry` placeholders at the first remaining failure point and continue filling, rather than immediately escalating. This preserves partial improvements instead of discarding them.
+- *Incomplete Stage 3 ban-list.* When `regenerate_whole_proof` was called multiple times (i.e., Stage~3 was entered more than once), only the single most-recent failed outline was passed as a ban-list seed. Subsequent regeneration rounds could therefore re-propose the same outline structure that had already failed. `driver.py` now accumulates all tried outlines in a `failed_outlines` list and passes the full list to `regenerate_whole_proof` via the `prior_outline_texts` parameter, ensuring every Stage~3 regeneration produces a structurally novel outline.
+
+- *Missed "Try this" suggestions.* When a failing block contains `apply sledgehammer` or the LLM triggers Isabelle's `try0` or `solve_direct`, Isabelle outputs lines of the form `Try this: simp add: append_assoc (0.5ms)`. The original code treated `"try this"` only as a keyword to classify the error; the tactic suggestion itself was silently discarded. The new `_extract_try_this_suggestions` / `_apply_try_this_to_block` pre-pass fires _before_ any LLM call: it extracts up to two such suggestions, substitutes each one into the last tactic line of the block, and verifies with Isabelle. When Isabelle's own suggestion succeeds, the LLM call is bypassed entirely, reducing both latency and token cost.
+
+- *Stage cascade broken.* The original `try_cegis_repairs` returned `(text, False, "stage=1 partial-progress")` immediately whenever Stage~1 changed the proof but did not fully solve it, so Stage~2 was never attempted on a partially-repaired proof. The fix removes the early return: after a Stage~1 partial edit, the function re-locates the first remaining `sorry`, recomputes the anchor line and proof-state context, and falls through to Stage~2 (case-block and subproof repair) with the improved text. The same cascade is applied between Stage~2a and Stage~2b.
 
 // ============================================================
 // 4. IMPLEMENTATION AND EXPERIMENTS
