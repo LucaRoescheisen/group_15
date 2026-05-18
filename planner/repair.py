@@ -806,11 +806,41 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
     current_text = full_text
     state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
     _log("repair", "State block", state0, trace=trace)
-    
+
     if allow_whole_fallback and trace:
-        print("[repair] (deprecated) allow_whole_fallback=True is ignored; driver handles regeneration.")        
+        print("[repair] (deprecated) allow_whole_fallback=True is ignored; driver handles regeneration.")
 
     prior_store: Dict[str, List[str]] = {}
+
+    # Improvement 2 — Deterministic `arbitrary:` fix:
+    # If Isabelle already reports 'locally fixed variable X', we know exactly
+    # what to add.  Try it before spending any LLM budget.
+    if resume_stage <= 1 and left() > 4.0:
+        _, _pre_errs = _quick_state_and_errors(isabelle, session, current_text, timeout_s=6)
+        _pre_err_texts = _normalize_error_texts(_pre_errs)
+        _arb_fix = _maybe_fix_arbitrary(current_text, _pre_err_texts)
+        if _arb_fix and _arb_fix != current_text:
+            if trace:
+                print("[repair] Trying deterministic arbitrary: fix…")
+            _arb_thy = build_theory(_arb_fix.splitlines(), add_print_state=False, end_with=None)
+            _arb_ok, _ = finished_ok(
+                _run_theory_with_timeout(isabelle, session, _arb_thy, timeout_s=_ISA_VERIFY_TIMEOUT_S)
+            )
+            if _arb_ok:
+                if trace:
+                    print("[repair] arbitrary: fix verified — done!")
+                return _arb_fix, True, "stage=0 arbitrary-fix"
+            # Partial: keep the improved text so subsequent stages benefit
+            if trace:
+                print("[repair] arbitrary: fix applied but not verified; continuing with improved text")
+            current_text = _arb_fix
+            lines_after_arb = current_text.splitlines()
+            # Recalculate hole_span (character offsets shift after the text change)
+            _new_hl = _find_first_hole(lines_after_arb)
+            if _new_hl is not None:
+                _off = sum(len(_l) + 1 for _l in lines_after_arb[:_new_hl])
+                hole_span = (_off, _off + len("sorry"))
+            state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
 
     # Stage 1: have/show/obtain micro-block
     hole_line, _, lines = _hole_line_bounds(current_text, hole_span)
