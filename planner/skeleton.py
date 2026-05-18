@@ -48,6 +48,35 @@ BARE_PROOF_RE  = re.compile(r"(?m)^\s*proof\s*$")
 # General proof-mode detectors (for ?case/?thesis normalization)
 _PROOF_OPEN_RE   = re.compile(r"(?m)^\s*proof(?:\s*\(([^)]+)\))?\s*$")
 _QED_LINE_RE     = re.compile(r"(?m)^\s*qed\b")
+
+# ---- Placeholder outline detection ----
+# Matches: have [label:] "..." or also have "..."
+_PLACEHOLDER_HAVE_RE = re.compile(
+    r'(?m)^\s*(?:have|also\s+have)\s+(?:[A-Za-z_]\w*\s*:\s*)?'
+    r'"([^"]*)"'
+)
+# A body is "placeholder" if it's only single uppercase letters and operators
+# e.g. "A = B", "B = C", "... = D"
+_PLACEHOLDER_BODY_RE = re.compile(
+    r'^(?:[A-Z]|\.\.\.)(?:\s*(?:=|<|>|≤|≥|\+|-|\*|/|·|∘|≠)\s*(?:[A-Z]|\.\.\.))*\s*$'
+)
+
+def _is_placeholder_outline(text: str) -> bool:
+    """Return True if the LLM emitted a placeholder outline with dummy single-letter variables.
+
+    Detects patterns like:
+        have f1: "A = B"   sorry
+        have f2: "B = C"   using f1 sorry
+        also have "... = D"  sorry
+    which are produced by small models that don't understand the goal.
+    """
+    matches = _PLACEHOLDER_HAVE_RE.findall(text)
+    if not matches:
+        return False
+    placeholder_count = sum(
+        1 for body in matches if _PLACEHOLDER_BODY_RE.match(body.strip())
+    )
+    return placeholder_count >= 2
 _MODE_CASES_RE   = re.compile(r"^\s*cases\b")
 _MODE_CASES_RULE = re.compile(r"^\s*cases\s+rule:")
 _MODE_INDUCT_RE  = re.compile(r"^\s*(?:induction|induct|coinduction|coinduct)\b")
