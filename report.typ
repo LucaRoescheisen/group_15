@@ -223,13 +223,17 @@ each theory is compiled in a throwaway session to avoid state leakage.
 
 A goal is counted as proved only when Isabelle fully accepts the proof with no
 `sorry` placeholders.
-System A uses a two-phase protocol: (1) Sledgehammer is called within a
+The prover (Systems A and B) uses a two-phase protocol: (1) Sledgehammer is called within a
 throwaway theory to collect ATP suggestions of the form `by <tactic>`; (2) each
 suggestion is independently re-submitted to Isabelle in a fresh theory and the
-FINISHED response is inspected for `ok = true`.
+FINISHED response is inspected for `ok = true` via `finished_ok` in
+`isabelle_api.py`.
 A goal is marked OK only if at least one suggestion passes Phase 2.
 This means the benchmark accepts proofs that are machine-checked by Isabelle,
 not merely suggested by an ATP.
+Note: a Pydantic v2 deserialization bug in the `isabelle_client` response handling
+caused `finished_ok` to always return `(False, {})` in earlier runs, making all
+verified proofs appear as failures; this was patched before the results reported here.
 
 *Failure classification.*
 Failed goals are classified into three categories based on elapsed time:
