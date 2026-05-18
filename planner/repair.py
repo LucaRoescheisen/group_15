@@ -1136,6 +1136,10 @@ def regenerate_whole_proof(*, full_text: str, goal_text: str, model: Optional[st
     patched = _repair_block(full_text, lines, ws, we, goal_text, state0, isabelle, session,
                             model, left, trace, "whole", stage=3, prior_store=prior_store)
     if patched != full_text:
-        # _repair_block only returns a different text if it verified successfully
-        return patched, True, "regen:whole-proof"
+        # _repair_block returns the last attempted text — verify before claiming success
+        _thy = build_theory(patched.splitlines(), add_print_state=False, end_with=None)
+        _ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, _thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
+        if _ok:
+            return patched, True, "regen:whole-proof"
+        return patched, False, "regen:unverified"
     return full_text, False, "regen:no-change"
