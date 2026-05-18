@@ -414,30 +414,41 @@ _MAX_PREV_BLOCKS = int(os.getenv("REPAIR_MAX_PREV_BLOCKS", "4"))
 
 # ========== Repair Operations (Parsing & Application) ==========
 
-def _propose_block_repair(*, goal: str, errors: List[str], ce_hints: Dict[str, List[str]], 
-                         proof_context: str,  block_type: str,
-                         block_text: str, model: Optional[str], timeout_s: int,
-                         why: str = "Previous attempt failed; propose a different block-level change.",
-                         prior_failed_blocks: Optional[str] = None) -> str:
+def _propose_block_repair(
+    *,
+    goal: str,
+    errors: List[str],
+    ce_hints: Dict[str, List[str]],
+    proof_context: str,
+    block_type: str,
+    block_text: str,
+    model: Optional[str],
+    timeout_s: int,
+    why: str = "Previous attempt failed; propose a different block-level change.",
+    prior_failed_blocks: Optional[str] = None,
+    temperature: Optional[float] = None,
+    ih_hints: Optional[List[str]] = None,
+) -> str:
     ce = ce_hints.get("bindings", []) + ce_hints.get("def_hints", [])
+    ih_str = "\n".join(ih_hints) if ih_hints else "(none)"
+    fmt_kwargs = dict(
+        goal=goal,
+        errors="\n".join(f"- {e}" for e in errors) or "(none)",
+        ce_hints="\n".join(ce) or "(none)",
+        ih_hints=ih_str,
+        proof_context=(proof_context or "").strip(),
+        block_text=block_text.rstrip(),
+        why=why,
+        prior_failed_blocks=(prior_failed_blocks or "(none)"),
+    )
     if block_type == "have-show":
-        prompt = _LOCAL_SYSTEM + "\n\n" + _LOCAL_USER.format(
-            goal=goal, errors="\n".join(f"- {e}" for e in errors) or "(none)",
-            ce_hints="\n".join(ce) or "(none)", 
-            proof_context=(proof_context or "").strip(),  # Changed from state_block
-            block_text=block_text.rstrip(), why=why,
-            prior_failed_blocks=(prior_failed_blocks or "(none)")
-        )
+        prompt = _LOCAL_SYSTEM + "\n\n" + _LOCAL_USER.format(**fmt_kwargs)
     else:
-        prompt = _BLOCK_SYSTEM + "\n\n" + _BLOCK_USER.format(
-            goal=goal, errors="\n".join(f"- {e}" for e in errors) or "(none)",
-            ce_hints="\n".join(ce) or "(none)", 
-            proof_context=(proof_context or "").strip(),  # Changed from state_block
-            block_text=block_text.rstrip(), why=why,
-            prior_failed_blocks=(prior_failed_blocks or "(none)")
-        )
+        prompt = _BLOCK_SYSTEM + "\n\n" + _BLOCK_USER.format(**fmt_kwargs)
     try:
-        return _sanitize_llm_block(_generate_simple(prompt, model=model, timeout_s=timeout_s))
+        return _sanitize_llm_block(
+            _generate_simple(prompt, model=model, timeout_s=timeout_s, temperature=temperature)
+        )
     except Exception:
         return ""
 
