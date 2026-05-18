@@ -729,7 +729,7 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
         if left() <= 3.0:
             break
         mem.rounds = rr + 1
-        why = f"Previous {block_type}-block attempt did not solve the goal; try a different strategy."
+        why = _why_from_errors(err_texts, block_type)
         timeout = int(min(60, max(8, left() * (0.55 / max(1, rounds - rr)))))
         
         # Build prior failed blocks text (trim + separators)
