@@ -720,11 +720,26 @@ def try_cegis_repairs(*, full_text: str, hole_span: Tuple[int, int], goal_text: 
             ok, _ = finished_ok(_run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_VERIFY_TIMEOUT_S))
             if ok:
                 return current_text, True, "stage=1 block:have-show"
-            # FIX: Return False for unverified changes
-            return current_text, False, "stage=1 partial-progress"
-        lines = current_text.splitlines()
-        state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
-    
+            # Stage 1 made partial progress but didn't fully solve the goal.
+            # Cascade: update state and continue to Stage 2 with the improved text
+            # rather than bailing out early.
+            if trace:
+                print("[repair] Stage 1 partial progress — cascading to Stage 2")
+            lines = current_text.splitlines()
+            # Re-locate the hole in the updated text so Stage 2 targets the right region
+            _new_hl = _find_first_hole(lines)
+            if _new_hl is not None:
+                _char_off = sum(len(_l) + 1 for _l in lines[:_new_hl])
+                hole_span = (_char_off, _char_off + len(lines[_new_hl]))
+            anchor_line, _ = _earliest_failure_anchor(
+                isabelle, session, current_text, default_line_0=(_new_hl or hole_line)
+            )
+            focus_line = _clamp_line_index(lines, anchor_line)
+            state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
+        else:
+            lines = current_text.splitlines()
+            state0 = _print_state_before_hole(isabelle, session, current_text, hole_span, trace=trace)
+
     # Stage 2a: Case-block
     cs, ce = _enclosing_case_block(lines, focus_line)
     if resume_stage <= 2 and cs >= 0 and left() > 5.0:
