@@ -661,12 +661,15 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                             focused_hole_key = hole_key
                             continue
                         else:
+                            # Record current outline as failed before regenerating
+                            if full not in failed_outlines:
+                                failed_outlines.append(full)
                             regen_budget = min(40.0, max(8.0, left_s() * 0.8))
                             try:
                                 new_full, ok_re, _ = regenerate_whole_proof(
                                     full_text=full, goal_text=goal_text, model=model,
                                     isabelle=isa, session=session, budget_s=regen_budget,
-                                    trace=trace, prior_outline_text=full
+                                    trace=trace, prior_outline_texts=list(failed_outlines),
                                 )
                             except (TimeoutError, _FuturesTimeout, ValueError) as ex:
                                 _restart_isabelle("regenerate_whole_proof", ex)
@@ -683,6 +686,9 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                                 focused_hole_key = None
                                 continue
 
+                            # Whole regen failed — record that attempt too, then try a fresh skeleton
+                            if new_full not in failed_outlines:
+                                failed_outlines.append(new_full)
                             if trace:
                                 print("[repair] Whole regeneration failed to verify; proposing a fresh outline…")
                             temps = tuple(outline_temps) if outline_temps else (0.35, 0.55, 0.85)
@@ -693,6 +699,8 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                                 lib_templates=lib_templates, alpha=alpha, beta=beta, gamma=gamma,
                                 hintlex_path=hintlex_path, hintlex_top=hintlex_top,
                             )
+                            if best.text not in failed_outlines:
+                                failed_outlines.append(best.text)
                             full = best.text
                             repair_progress.clear()
                             stage_tries.clear()
