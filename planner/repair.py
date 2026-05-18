@@ -903,22 +903,38 @@ def _repair_block(current_text: str, lines: List[str], start: int, end: int, goa
     err_texts = _normalize_error_texts(errs)
     ce = get_counterexample_hints_for_repair(isabelle, session, state0, timeout_s=10)
     block = "\n".join(lines[start:end])
-    
-    # NEW: Extract proof context instead of using state block
+
+    # Extract proof context and induction hypotheses from proof state
     proof_context = _extract_proof_context(current_text, start)
-    
+    ih_hints = _extract_induction_hyps(state0)
+
     _log("repair", f"{block_type}-block (input)", block, trace=trace)
-    _log("repair", "proof_context (LLM input)", proof_context, trace=trace)  # Changed log
+    _log("repair", "proof_context (LLM input)", proof_context, trace=trace)
     _log("repair", "errors (LLM input)", "\n".join(err_texts) or "(none)", trace=trace)
-    ce_list = ce.get("bindings", []) + ce.get("def_hints", []) if isinstance(ce, dict) else []  
+    ce_list = ce.get("bindings", []) + ce.get("def_hints", []) if isinstance(ce, dict) else []
     _log("repair", "counterexamples (LLM input)", "\n".join(ce_list) or "(none)", trace=trace)
+    if ih_hints and trace:
+        print(f"[repair] IH hints: {ih_hints}")
     rounds = 3 if left() >= 18.0 else 2 if left() >= 10.0 else 1
     mem = _RepairMemory()
 
-    # Pre-LLM pass: try any "Try this: <tactic>" suggestions Isabelle gave us.
-    # These come from sledgehammer or solve_direct and are almost always correct,
-    # so we try them before spending LLM budget.
-    _try_suggestions = _extract_try_this_suggestions(err_texts)
+    # Improvement 1 — Proactive Sledgehammer:
+    # Before any LLM call, replace the first sorry in the block with
+    # 'by sledgehammer' and run Isabelle.  If the ATP finds a proof it prints
+    # 'Try this: by (simp add: ...)' which we collect here — often skipping the
+    # entire LLM budget for this hole.
+    if left() > 8.0:
+        _sledge_timeout = min(12, int(left() * 0.25))
+        _sledge_suggs = _proactive_sledgehammer_suggestions(
+            isabelle, session, current_text, start, end, timeout_s=_sledge_timeout
+        )
+        if _sledge_suggs and trace:
+            print(f"[repair] Proactive Sledgehammer found {len(_sledge_suggs)} suggestion(s): {_sledge_suggs[:2]}")
+        # Prepend ATP suggestions before any LLM-sourced ones
+        _try_suggestions = _sledge_suggs + _extract_try_this_suggestions(err_texts)
+    else:
+        _try_suggestions = _extract_try_this_suggestions(err_texts)
+
     block_lines_for_tt = block.splitlines()
     for _suggestion in _try_suggestions[:2]:
         if left() <= 3.0:
