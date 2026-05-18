@@ -867,16 +867,22 @@ next
     sorry
 qed
 ''')
+    if "rev" in toks and "xs" in toks:
+        lib.append(
+f'''lemma "{goal}"
+proof (induction xs)
+  case Nil
+  show ?case by simp
+next
+  case (Cons x xs)
+  show ?case
+    sorry
+qed
+''')
     lib.append(
 f'''lemma "{goal}"
 proof -
-  have f1: "(* fill a useful intermediate statement *)"
-    sorry
-  have f2: "(* another useful intermediate *)"
-    using f1
-    sorry
   show ?thesis
-    using f1 f2
     sorry
 qed
 ''')
