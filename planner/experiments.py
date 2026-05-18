@@ -71,16 +71,34 @@ def _close_client_loop_safely(client) -> None:
     gc.collect()
     _drain_and_close_loop(loop)
 
-# last-ditch guard for interpreter teardown (silences only the closed-loop case)
+# last-ditch guard for interpreter teardown (silences closed-loop / closed-pipe noise)
 _orig_del = _BST.__del__
 def _quiet_bst_del(self, *a, **kw):
     try:
         _orig_del(self, *a, **kw)
-    except RuntimeError as e:
-        if "Event loop is closed" in str(e):
+    except (RuntimeError, ValueError, Exception) as e:
+        msg = str(e)
+        if any(s in msg for s in ("Event loop is closed", "I/O operation on closed pipe",
+                                   "closed pipe", "closed loop")):
             return
         raise
 _BST.__del__ = _quiet_bst_del
+
+# Python 3.14 proactor pipe transport also raises ValueError from its own __del__
+try:
+    from asyncio.proactor_events import _ProactorBasePipeTransport as _PBPT  # type: ignore
+    if _PBPT is not _BST:
+        _orig_pbpt_del = _PBPT.__del__
+        def _quiet_pbpt_del(self, *a, **kw):
+            try:
+                _orig_pbpt_del(self, *a, **kw)
+            except (RuntimeError, ValueError, Exception) as e:
+                if any(s in str(e) for s in ("I/O operation on closed pipe", "Event loop is closed", "closed")):
+                    return
+                raise
+        _PBPT.__del__ = _quiet_pbpt_del
+except (ImportError, AttributeError):
+    pass
 
 @atexit.register
 def _planner_atexit_drain():
