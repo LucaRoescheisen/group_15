@@ -26,6 +26,8 @@ import statistics as stats
 import sys
 import time
 import traceback
+import warnings
+warnings.filterwarnings("ignore", category=ResourceWarning)
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
