@@ -855,10 +855,13 @@ def regenerate_whole_proof(*, full_text: str, goal_text: str, model: Optional[st
     left = lambda: max(0.0, budget_s - (time.monotonic() - t0))
     # Use empty/quick state — the block prompt already carries enough context
     state0 = ""
-    # Seed prior failed blocks with the previous outline (so the first round won't repeat it)
+    # Seed ban-list with ALL previously failed outlines so Stage 3 never repeats any of them
+    all_priors: List[str] = list(prior_outline_texts or [])
+    if prior_outline_text and prior_outline_text not in all_priors:
+        all_priors.append(prior_outline_text)
     prior_store: Dict[str, List[str]] = {}
-    if prior_outline_text:
-        prior_store["whole"] = [prior_outline_text]
+    if all_priors:
+        prior_store["whole"] = all_priors
     patched = _repair_block(full_text, lines, ws, we, goal_text, state0, isabelle, session,
                             model, left, trace, "whole", stage=3, prior_store=prior_store)
     if patched != full_text:
