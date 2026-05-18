@@ -93,9 +93,9 @@ def _fingerprint_block(text: str) -> str:
     Normalises:
     - Whitespace collapse
     - Quote/backtick variants
-    - ATP tactic synonyms: by auto / blast / fastforce / clarsimp → by ATP
+    - ATP tactic synonyms: by auto/blast/fastforce/clarsimp -> by ATP
     - simp add: lemma lists sorted so ordering differences don’t bypass dedup
-    - Generated fact labels f1/f2/h1/g1 → fN so label renames look identical
+    - Generated fact labels f1/f2/h1/g1 -> fN so label renames look identical
     “””
     if not text:
         return “”
