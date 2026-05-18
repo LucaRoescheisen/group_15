@@ -359,11 +359,14 @@ def _hf_generate(prompt: str, model_id: str, timeout_s: int, *, temperature: Opt
         result = str(data)
     return _sanitize_llm_block(result.strip())
 
-def _gemini_generate(prompt: str, model_id: str, timeout_s: int) -> str:
+def _gemini_generate(prompt: str, model_id: str, timeout_s: int, *, temperature: Optional[float] = None) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set")
-    payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": OLLAMA_NUM_PREDICT}}
+    gen_cfg: Dict[str, Any] = {"maxOutputTokens": OLLAMA_NUM_PREDICT}
+    if temperature is not None:
+        gen_cfg["temperature"] = temperature
+    payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": gen_cfg}
     resp = _SESSION.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}", json=payload, timeout=timeout_s)
     resp.raise_for_status()
     data = resp.json()
