@@ -88,12 +88,27 @@ def _is_effective_block(text: str) -> bool:
     return bool(_sanitize_llm_block(text or "").strip())
 
 def _fingerprint_block(text: str) -> str:
-    """Canonicalize a block to detect duplicates across rounds."""
+    “””Canonicalize a block to detect duplicates across rounds.
+
+    Normalises:
+    - Whitespace collapse
+    - Quote/backtick variants
+    - ATP tactic synonyms: by auto / blast / fastforce / clarsimp → by ATP
+    - simp add: lemma lists sorted so ordering differences don’t bypass dedup
+    - Generated fact labels f1/f2/h1/g1 → fN so label renames look identical
+    “””
     if not text:
-        return ""
-    # Collapse whitespace, drop zero-width and backticks, normalize quotes.
-    t = re.sub(r"\s+", " ", text.strip())
-    t = t.replace("`", "").replace("“", '"').replace("”", '"').replace("’", "'")
+        return “”
+    t = re.sub(r”\s+”, “ “, text.strip())
+    t = t.replace(“`”, “”).replace(““”, ‘”’).replace(“””, ‘”’).replace(“‘”, “’”)
+    # Treat common ATP synonyms as identical
+    t = re.sub(r”\bby\s+(auto|blast|fastforce|clarsimp)\b”, “by ATP”, t)
+    # Sort simp add: lemma lists so “simp add: a b” == “simp add: b a”
+    def _sort_simp(m: re.Match) -> str:
+        return “simp add: “ + “ “.join(sorted(m.group(1).split()))
+    t = re.sub(r”\bsimp\s+add:\s+([^\n\]()]+)”, _sort_simp, t)
+    # Normalise generated fact labels so renaming doesn’t bypass dedup
+    t = re.sub(r”\b[fhg]\d+\b”, “fN”, t)
     return t
 
 def _trim_block_for_prompt(text: str, max_chars: int = 800) -> str:
