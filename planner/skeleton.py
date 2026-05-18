@@ -563,6 +563,8 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
     text = _normalize_show_kinds(text)
     text = _ensure_have_show_bodies(text)
     text = _strip_tactics_after_sorry(text)
+    text = _strip_orphan_sorry(text)
+    text = _force_sorry_have_show_bodies(text)
     text = _maybe_proof_dash(text)
 
     # Trim to the first complete lemma..qed block to avoid trailing splices
