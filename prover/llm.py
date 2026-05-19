@@ -335,13 +335,35 @@ def propose_steps(
         all_lists.append(cands)
 
     from .heuristics import augment_with_facts_for_steps, rank_candidates
-    merged = merge_candidates(all_lists, NUM_CANDIDATES) or [
-        "apply simp",
-        "apply auto",
-        "apply clarsimp",
-        "apply (induction xs)",
-        "apply (cases xs)",
-    ]
+
+    # Context-aware fallback for when the LLM returns no parseable proposals.
+    # The previous fallback ALWAYS included `apply (induction xs)` and
+    # `apply (cases xs)`, which is nonsense for goals with no list variables —
+    # it wasted budget on goals like `bij_betw f A B ⟹ f ` A = B` and on
+    # arithmetic goals like `a - a = 0`.
+    def _context_aware_fallback() -> List[str]:
+        haystack = f"{goal} {state_hint or ''}"
+        fb = ["apply simp", "apply auto", "apply clarsimp", "apply blast", "apply fastforce"]
+        # Only add list-induction tactics if a list variable is plausibly present.
+        if re.search(r"\bxs\b|\bys\b|\bzs\b|\b[a-z]s[0-9]+\b|@|\bmap\b|\brev\b|\blength\b|\bhd\b|\btl\b|#", haystack):
+            fb.extend(["apply (induction xs)", "apply (cases xs)"])
+        # Only add nat-induction if a likely nat variable / Suc / arithmetic is present.
+        if re.search(r"\bSuc\b|\bn\b|\bm\b|\b[a-z][0-9]+\b\s*[+\-*]|\b(div|mod)\b", haystack):
+            fb.extend(["apply (induction n)", "apply (cases n)"])
+        # Definition-unfolding finishers — cheap and often decisive for
+        # goals over named predicates like `inj`, `bij_betw`, `surj`, ...
+        for stem in re.findall(r"\b([a-z][a-z_]{2,})\b", goal):
+            if stem in {"set", "map", "rev", "length", "card", "hd", "tl",
+                        "fst", "snd", "the", "some", "none", "true", "false",
+                        "and", "or", "not"}:
+                continue
+            fb.append(f"apply (auto simp: {stem}_def)")
+            # Only inject the first ~2 unique stems to keep the list short.
+            if sum(1 for x in fb if "_def" in x) >= 2:
+                break
+        return fb
+
+    merged = merge_candidates(all_lists, NUM_CANDIDATES) or _context_aware_fallback()
 
     if facts:
         facts_blob = " ".join(facts)

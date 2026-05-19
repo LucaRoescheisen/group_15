@@ -44,6 +44,7 @@ from prover.isabelle_api import (
     session_start as _session_start_compat,
 )
 from prover import config as CFG  # NEW: live switches for premise/context
+from prover.goal_typing import annotate_numeric_vars
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 def _drain_and_close_loop(loop: asyncio.AbstractEventLoop | None) -> None:
@@ -629,7 +630,15 @@ def cmd_bench(args: argparse.Namespace) -> None:
                     rnd = random.Random(base_seed + r)
                     rnd.shuffle(goals_run)
                 for i, g in enumerate(goals_run, 1):
-                    print(f"[{cfg_name}] (run {r+1}/{args.repeats}) [{i}/{len(goals_run)}] {g}")
+                    # Heuristic type annotation: bare arithmetic goals like
+                    # `m + n = n + m` get `(m::nat) + n = n + m` so Isabelle
+                    # doesn't infer a too-general type that blocks `by simp`.
+                    _g_orig = g
+                    g = annotate_numeric_vars(g)
+                    if g != _g_orig:
+                        print(f"[{cfg_name}] (run {r+1}/{args.repeats}) [{i}/{len(goals_run)}] {g}   (was: {_g_orig})")
+                    else:
+                        print(f"[{cfg_name}] (run {r+1}/{args.repeats}) [{i}/{len(goals_run)}] {g}")
                     row, outline_text, verify_details = _bench_run_one(
                         isabelle, session_id, g, cfg,
                         model=args.model, diverse=bool(args.diverse)

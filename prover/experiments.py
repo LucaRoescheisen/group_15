@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .isabelle_api import start_isabelle_server, get_isabelle_client, session_start as _session_start
 from .prover import prove_goal
+from .goal_typing import annotate_numeric_vars, looks_arithmetic
 from . import config as CFG
 
 def _silence_asyncio_transport_del():
@@ -266,7 +267,13 @@ def cmd_bench(args: argparse.Namespace) -> None:
                             rnd = random.Random(base_seed + r)
                             rnd.shuffle(goals_run)
                         for i, g in enumerate(goals_run, 1):
-                            print(f"[{cfg_name}] (run {r+1}/{args.repeats}) [{i}/{len(goals_run)}] {g}")
+                            # Heuristic type annotation for bare arithmetic goals.
+                            _g_orig = g
+                            g = annotate_numeric_vars(g)
+                            if g != _g_orig:
+                                print(f"[{cfg_name}] (run {r+1}/{args.repeats}) [{i}/{len(goals_run)}] {g}   (was: {_g_orig})")
+                            else:
+                                print(f"[{cfg_name}] (run {r+1}/{args.repeats}) [{i}/{len(goals_run)}] {g}")
                             rows.append(_bench_run_one(isabelle, session_id, g, cfg, single_model, models_ensemble))
 
                     s = _bench_summarize(rows)
@@ -429,7 +436,18 @@ def cmd_regress(args: argparse.Namespace) -> None:
                 rnd.shuffle(gs)
 
         for i, g in enumerate(gs, 1):
-            print(f"[{suite_name}] [{i}/{len(gs)}] {g}")
+            # Heuristic type annotation: many goal-file extractions strip the
+            # context that fixed variable types (e.g. `fix m n :: nat`). Without
+            # that, `m + n = n + m` is unprovable because Isabelle infers `'a`
+            # with only the `plus` typeclass. Annotate the first occurrence of
+            # each lowercase free variable with `::nat` when the goal looks
+            # arithmetic; leave list/set/propositional goals untouched.
+            _g_orig = g
+            g = annotate_numeric_vars(g)
+            if g != _g_orig:
+                print(f"[{suite_name}] [{i}/{len(gs)}] {g}   (was: {_g_orig})")
+            else:
+                print(f"[{suite_name}] [{i}/{len(gs)}] {g}")
             res = prove_goal(
                 isabelle, session_id, g,
                 model_name_or_ensemble=(args.model or os.environ.get("OLLAMA_MODEL", "qwen3-coder:30b")),
