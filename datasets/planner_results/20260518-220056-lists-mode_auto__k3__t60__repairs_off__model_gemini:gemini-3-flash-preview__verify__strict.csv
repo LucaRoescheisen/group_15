@@ -1,0 +1,19 @@
+goal,success,elapsed_s,mode,model,outline_chars,fills,failed_holes,had_sorry,verified_ok
+x ∈ set xs ⟹ x ∈ set (xs @ ys),False,70.9101,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+set (xs @ ys) = set xs ∪ set ys,False,54.7695,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+map id xs = xs,False,2.2945,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+take (length xs) (xs @ ys) = xs,False,0.6375,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+map f (xs @ ys) = map f xs @ map f ys,False,0.6571,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+length (xs @ ys) = length xs + length ys,False,4.5121,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+filter p (xs @ ys) = filter p xs @ filter p ys,False,0.2379,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+map f (rev xs) = rev (map f xs),False,0.2257,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+drop (length xs) (xs @ ys) = ys,False,0.2060,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+distinct xs ⟹ distinct (rev xs),False,0.1992,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+xs @ [] = xs,False,0.1844,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+take n xs @ drop n xs = xs,False,0.2127,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+[] @ xs = xs,False,0.2601,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+x ∈ set ys ⟹ x ∈ set (xs @ ys),False,0.2265,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+map f (filter p xs) = filter (λx. p x) (map f xs),False,0.5744,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+length (rev xs) = length xs,False,0.1681,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+rev (rev xs) = xs,False,0.1778,auto,gemini:gemini-3-flash-preview,0,0,0,False,True
+rev (xs @ ys) = rev ys @ rev xs,False,0.1941,auto,gemini:gemini-3-flash-preview,0,0,0,False,True

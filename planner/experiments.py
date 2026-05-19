@@ -345,12 +345,14 @@ def _verify_with_auto_restart(isabelle, session_id: str, isar_text: str) -> Tupl
         return False, f"transport_error_after_restart: {type(e).__name__}: {e}"
 
 # ---------- plan_and_fill safety wrapper ----------
-def _safe_plan_and_fill(*, goal: str, model: Optional[str], cfg) -> Tuple[Optional[Any], str]:
+def _safe_plan_and_fill(*, goal: str, model: Optional[str], cfg,
+                        isabelle=None, session_id: Optional[str] = None) -> Tuple[Optional[Any], str]:
     """
     Run planner.plan_and_fill and trap any provider/network exceptions.
     Returns (res, err_text). When res is None, the caller should mark failure but continue the run.
+    Pass isabelle/session_id to reuse the bench server instead of spawning a new one per goal.
     """
-    try:             
+    try:
         res = plan_and_fill(
             goal,
             model=model,
@@ -367,6 +369,7 @@ def _safe_plan_and_fill(*, goal: str, model: Optional[str], cfg) -> Tuple[Option
             lib_templates=cfg.lib_templates,
             alpha=cfg.alpha, beta=cfg.beta, gamma=cfg.gamma,
             hintlex_path=cfg.hintlex, hintlex_top=cfg.hintlex_top,
+            isabelle=isabelle, session_id=session_id,
         )
         return res, ""
     except Exception as e:
@@ -429,13 +432,14 @@ def _bench_run_one(
     if cfg.trace:
         print(f"[planner] ▶ goal: {goal}", flush=True)
         print(f"[planner]   mode={cfg.mode} k={call_cfg.k} timeout={cfg.timeout}s repairs={cfg.repairs}", flush=True)
-    res, plan_err = _safe_plan_and_fill(goal=goal, model=model, cfg=call_cfg)
+    res, plan_err = _safe_plan_and_fill(goal=goal, model=model, cfg=call_cfg,
+                                        isabelle=isabelle, session_id=session_id)
 
     dt = time.time() - t0
 
     if res is None:
         if cfg.trace:
-            print(f"[planner]   ❌ planner error: {plan_err}", flush=True)        
+            print(f"[planner]   ❌ planner error: {plan_err}", flush=True)
         # Planner crashed for this goal: mark as failure, log error, skip verify
         outline_text = ""
         had_sorry = False

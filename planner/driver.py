@@ -59,11 +59,32 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
     except Exception:
         prev_line = ""
     
-    if (_INLINE_BY_TAIL.search(prev_line) or _TACTIC_LINE_RE.match(prev_line) or 
+    if (_INLINE_BY_TAIL.search(prev_line) or _TACTIC_LINE_RE.match(prev_line) or
         prev_line.strip() in {"done", "."}):
         s, e = hole_span
         return full_text[:s] + "\n" + full_text[e:], True, "(stale-hole)"
-    
+
+    # FAST PATH: try common finishers directly against the full proof before
+    # invoking the expensive prove_goal machinery (Sledgehammer + LLM beam).
+    # For well-formed library templates with case-aware `using <case>` clauses,
+    # one of these almost always closes the goal in <1s each. Avoids relying on
+    # prove_goal's success path, which has been observed to return success=False
+    # even when Sledgehammer found valid finishers (the finishers are not
+    # surfaced in the failure return value).
+    s, e = hole_span
+    _quick_fins = ["by auto", "by simp", "by force", "by fastforce", "by blast", "by (auto simp: algebra_simps)"]
+    for _fin in _quick_fins:
+        _new = full_text[:s] + _fin + full_text[e:]
+        try:
+            if _verify_full_proof(isabelle, session, _new):
+                if trace:
+                    print(f"[fill] fast-path finisher succeeded: {_fin}")
+                return _new, True, _fin
+        except Exception as _ex:
+            if trace:
+                print(f"[fill] fast-path {_fin!r} crashed: {type(_ex).__name__}: {_ex}")
+            continue
+
     state_block = _print_state_before_hole(isabelle, session, full_text, hole_span, trace)
     _log_state_block("fill", state_block, trace=trace)
     
@@ -181,14 +202,36 @@ def _fill_one_hole(isabelle, session: str, full_text: str, hole_span: Tuple[int,
         if applies:
             body = ("\n" + indent).join(applies) + "\n" + indent + fin
             new_text = full_text[:line_start] + indent + body + full_text[e:]
+            if _verify_full_proof(isabelle, session, new_text):
+                return new_text, True, "\n".join(script_lines)
         else:
+            # Try 1: replace sorry directly (works when sorry is at top of proof/apply context)
             new_text = full_text[:s] + fin + full_text[e:]
+            if _verify_full_proof(isabelle, session, new_text):
+                return new_text, True, fin
 
-        if _verify_full_proof(isabelle, session, new_text):
-            return new_text, True, "\n".join(script_lines)
+            # Try 2: replace the entire proof..qed block with an inline finisher.
+            # Handles the common case of "proof -\n  sorry\nqed" where a bare "by X"
+            # inside proof/qed creates a stray qed after the finisher closes the goal.
+            proof_start = full_text.rfind("\nproof", 0, s)
+            if proof_start == -1:
+                proof_start = full_text.rfind("proof", 0, s)
+            qed_pos = full_text.find("qed", e)
+            if proof_start != -1 and qed_pos != -1:
+                qed_pos += len("qed")
+                new_text2 = full_text[:proof_start] + "\n  " + fin + full_text[qed_pos:]
+                if _verify_full_proof(isabelle, session, new_text2):
+                    return new_text2, True, fin
+
+            # Try 3: show ?thesis inside the proof block
+            show_line = f"show ?thesis\n    {fin}"
+            insert = "\n  " + show_line + "\n"
+            new_text3 = full_text[:s] + insert + full_text[e:]
+            if _verify_full_proof(isabelle, session, new_text3):
+                return new_text3, True, show_line
+
         if trace:
             print(f"[fill] finisher-unverified: {fin!r}")
-            print(f"[fill] new_text snippet: ...{new_text[max(0,s-40):s+60]}...")
         return full_text, False, "finisher-unverified"
     
     # Handle apply-only  (NEVER mark success for apply-only scripts)
@@ -564,7 +607,8 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
                  priors_path: Optional[str] = None, context_hints: bool = False,
                  lib_templates: bool = False, alpha: float = 1.0, beta: float = 0.5,
                  gamma: float = 0.2, hintlex_path: Optional[str] = None,
-                 hintlex_top: int = 8) -> PlanAndFillResult:
+                 hintlex_top: int = 8,
+                 isabelle=None, session_id: Optional[str] = None) -> PlanAndFillResult:
     """Plan and fill holes in Isar proofs.
 
     Notes:
@@ -575,9 +619,15 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
     if repair_trace and not trace:
         trace = True
 
-    server_info, proc = start_isabelle_server(name="planner", log_file="logs/planner_ui.log")
-    isa = get_isabelle_client(server_info)
-    session = _session_start(isa, session=ISABELLE_SESSION)
+    own_server = isabelle is None
+    proc = None
+    if own_server:
+        server_info, proc = start_isabelle_server(name="planner", log_file="logs/planner_ui.log")
+        isa = get_isabelle_client(server_info)
+        session = _session_start(isa, session=ISABELLE_SESSION)
+    else:
+        isa = isabelle
+        session = session_id
 
     t0 = time.monotonic()
     left_s = lambda: max(0.0, timeout - (time.monotonic() - t0))
@@ -586,7 +636,7 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
 
     def _restart_isabelle(reason: str, ex: Optional[BaseException] = None) -> None:
         nonlocal isa, session, proc, restart_count
-        if restart_count >= 2:
+        if not own_server or restart_count >= 2:
             return
         restart_count += 1
         if trace:
@@ -604,6 +654,37 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
         isa, session, proc = isa2, session2, proc2
 
     try:
+        # TOP-LEVEL FINISHER PROBE
+        # Many lemmas in standard benchmark suites are one-liners — provable
+        # directly by `by auto` / `by simp` / `by force` / etc. at the top
+        # level, without any structured outline. Probe these first; each is a
+        # single Isabelle verify call (~1-3s) and short-circuits the entire
+        # outline-generation + hole-fill pipeline when it succeeds.
+        _toplevel_fins = [
+            "by auto",
+            "by simp",
+            "by force",
+            "by fastforce",
+            "by blast",
+            "by (auto simp: algebra_simps)",
+        ]
+        for _fin in _toplevel_fins:
+            if left_s() <= 2.0:
+                break
+            _candidate = f'lemma "{goal}"\n  {_fin}\n'
+            try:
+                if _verify_full_proof(isa, session, _candidate):
+                    if trace:
+                        print(f"[planner] top-level finisher succeeded: {_fin}")
+                    return PlanAndFillResult(True, _candidate, [_fin], [])
+            except (TimeoutError, _FuturesTimeout, ValueError) as ex:
+                _restart_isabelle("toplevel_finisher_probe", ex)
+                continue
+            except Exception as ex:
+                if trace:
+                    print(f"[planner] top-level finisher {_fin!r} crashed: {type(ex).__name__}: {ex}")
+                continue
+
         # Generate outline
         if legacy_single_outline:
             full = propose_isar_skeleton(goal, model=model, temp=0.35, force_outline=(mode == "outline")).text
@@ -765,6 +846,13 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
 
             # Try CEGIS repairs
             current_stage = repair_progress.get(hole_key, 0)
+            if current_stage > 0 and not repairs:
+                if trace:
+                    print(f"[fill] Hole @{hole_key} could not be filled and repairs are disabled. Giving up.")
+                failed.append(len(fills))
+                repair_progress.pop(hole_key, None)
+                focused_hole_key = None
+                break
             if current_stage > 0 and repairs and left_s() > 6:
                 try:
                     state = _print_state_before_hole(isa, session, full, span, trace)
@@ -914,4 +1002,5 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
         return PlanAndFillResult(False, full, fills, failed)
 
     finally:
-        _cleanup_resources(isa, proc)
+        if own_server:
+            _cleanup_resources(isa, proc)

@@ -4,6 +4,7 @@ from typing import List, Tuple, Optional, Any, Dict, Iterable
 import json
 import os
 import re
+import time as _time
 from functools import lru_cache
 from planner.prompts import SKELETON_PROMPT
 import requests
@@ -639,14 +640,11 @@ def _sanitize_outline(text: str, goal: str, *, force_outline: bool) -> str:
     return text
 
 def _quick_sketch_score(isabelle, session_id: str, outline_text: str) -> int:
-    try:
-        thy = build_theory(outline_text.splitlines(), add_print_state=True, end_with="sorry")
-        resps = run_theory(isabelle, session_id, thy)
-        block = last_print_state_block(resps) or ""
-        n = parse_subgoals(block)
-        return int(n) if isinstance(n, int) else 9999
-    except Exception:
-        return 9999
+    # Count sorry tokens as proxy for open subgoals — avoids 5-10s Isabelle
+    # overhead per candidate and the 9999 mis-score for complete proofs where
+    # appending print_state/sorry after qed causes a toplevel syntax error.
+    count = len(re.findall(r'\bsorry\b', outline_text))
+    return max(1, count)
 
 def _state_block_for_goal(isabelle, session_id: str, goal: str) -> str:
     mini = f'lemma "{goal}"\nproof\n  sorry\nqed\n'
@@ -835,10 +833,11 @@ def _lib_templates_for_goal(goal: str) -> List[Skeleton]:
 f'''lemma "{goal}"
 proof (induction xs)
   case Nil
-  show ?case by simp
+  show ?case using Nil by simp
 next
-  case (Cons x xs)
+  case (Cons a as)
   show ?case
+    using Cons
     sorry
 qed
 ''')
@@ -847,10 +846,11 @@ qed
 f'''lemma "{goal}"
 proof (induction n)
   case 0
-  show ?case by simp
+  then show ?case by simp
 next
-  case (Suc n)
+  case (Suc m)
   show ?case
+    using Suc
     sorry
 qed
 ''')
@@ -872,10 +872,11 @@ qed
 f'''lemma "{goal}"
 proof (induction xs)
   case Nil
-  show ?case by simp
+  show ?case using Nil by simp
 next
-  case (Cons x xs)
+  case (Cons a as)
   show ?case
+    using Cons
     sorry
 qed
 ''')
@@ -930,11 +931,24 @@ def propose_isar_skeleton_diverse_best(
     minimal_sk_text = f'lemma "{goal}"\nproof -\n  sorry\nqed\n'
     minimal_sk = Skeleton(text=minimal_sk_text, holes=find_sorry_spans(minimal_sk_text))
 
-    # Outline candidates (LLM) + optional library templates
-    cands = propose_isar_skeletons(goal, model=model, temps=temps, k=k,
-                                   force_outline=force_outline, hints=rec_hints)
-    if lib_templates:
-        cands = _lib_templates_for_goal(goal) + cands
+    # Goal-specific library templates (e.g. list induction).
+    # When one exists for this goal we use it preferentially and SKIP the
+    # expensive LLM outline call entirely — qwen3:8b takes ~15-20s per outline
+    # and with k=3 that consumes the entire goal budget, leaving no time for
+    # the hole-filling phase. The library template is reliably correct for
+    # these shapes anyway, so the LLM diversity is not worth the cost.
+    lib_all = _lib_templates_for_goal(goal)
+    lib_specific = lib_all[:-1]  # drop the generic proof- fallback
+
+    if lib_specific:
+        # Fast path: use library template(s) only; no LLM outline calls.
+        cands = list(lib_specific)
+    else:
+        # No goal-specific template — fall back to LLM outline generation.
+        cands = propose_isar_skeletons(goal, model=model, temps=temps, k=k,
+                                       force_outline=force_outline, hints=rec_hints)
+        if lib_templates:
+            cands = lib_all + cands  # old behaviour when flag is set explicitly
 
     # Prepend the minimal fallback so it always participates in scoring.
     # The diverse LLM outlines follow; if any score strictly better (fewer

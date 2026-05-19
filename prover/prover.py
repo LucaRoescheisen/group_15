@@ -451,19 +451,23 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                 if time_left_s() <= 0: break
                 pruned = False
                 if use_qc and _should_boolean_precheck and depth % max(1, qc_every) == 0:
+                    if trace:
+                        print(color(use_color, "dim", f"  qc    → [{origin}] {c}  (budget={qc_timeout}s)"), flush=True)
                     try:
                         if precheck_quickcheck_refutes(isabelle, session_id, steps + [c], timeout_s=qc_timeout):
                             pruned = True
-                            if trace: print(color(use_color, "dim", f"  step  ·  [{origin}] {c}  [pruned by quickcheck]"))
+                            if trace: print(color(use_color, "dim", f"  step  ·  [{origin}] {c}  [pruned by quickcheck]"), flush=True)
                     except Exception as e:
-                        if trace: print(color(use_color, "yellow", f"  quickcheck error ignored: {e}"))
+                        if trace: print(color(use_color, "yellow", f"  quickcheck error ignored: {type(e).__name__}: {str(e)[:200]}"), flush=True)
                 if not pruned and use_np and _should_boolean_precheck and depth % max(1, np_every) == 0:
+                    if trace:
+                        print(color(use_color, "dim", f"  np    → [{origin}] {c}  (budget={np_timeout}s)"), flush=True)
                     try:
                         if precheck_nitpick_refutes(isabelle, session_id, steps + [c], timeout_s=np_timeout):
                             pruned = True
-                            if trace: print(color(use_color, "dim", f"  step  ·  [{origin}] {c}  [pruned by nitpick]"))
+                            if trace: print(color(use_color, "dim", f"  step  ·  [{origin}] {c}  [pruned by nitpick]"), flush=True)
                     except Exception as e:
-                        if trace: print(color(use_color, "yellow", f"  nitpick error ignored: {e}"))
+                        if trace: print(color(use_color, "yellow", f"  nitpick error ignored: {type(e).__name__}: {str(e)[:200]}"), flush=True)
                 if pruned:
                     logger.log_attempt(
                         "expand", steps, c, False, None, False, 0.0, depth_reached,
@@ -474,7 +478,7 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                            "origin": origin,
                            # supervision for premise training
                            "retrieval_picks": picks_ids_compact,
-                           "cand_facts": extract_candidate_facts(c),                           
+                           "cand_facts": extract_candidate_facts(c),
                            # real pool metrics from retrieval picks
                            "premise_cosine_top1": float(pool_feats.get("premise_cosine_top1", 0.0)),
                            "premise_cosine_topk_mean": float(pool_feats.get("premise_cosine_topk_mean", 0.0)),
@@ -493,9 +497,20 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                     )
                     continue
                 per_call_timeout = max(1, int(min(time_left_s(), float(budget))))
-                ok, n_sub, hint, cache_hit, elapsed_ms = try_step_cached(
-                    isabelle, session_id, steps, c, timeout_s=per_call_timeout
-                )
+                # Visibility: announce we're about to test this candidate so
+                # silent hangs/exceptions in try_step_cached are diagnosable.
+                if trace:
+                    print(color(use_color, "dim", f"  step  → [{origin}] {c}  (budget={per_call_timeout}s)"), flush=True)
+                try:
+                    ok, n_sub, hint, cache_hit, elapsed_ms = try_step_cached(
+                        isabelle, session_id, steps, c, timeout_s=per_call_timeout
+                    )
+                except Exception as _step_ex:
+                    if trace:
+                        print(color(use_color, "red",
+                            f"  step  ! [{origin}] {c}  EXC {type(_step_ex).__name__}: {str(_step_ex)[:200]}"),
+                            flush=True)
+                    ok, n_sub, hint, cache_hit, elapsed_ms = False, None, "", False, 0.0
                 logger.log_attempt(
                     "expand", steps, c, ok, n_sub, cache_hit, elapsed_ms, depth_reached,
                     subgoals_before=prev_n,
@@ -528,7 +543,7 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
                     tag = color(use_color, "green", "✓") if ok else color(use_color, "red", "×")
                     extra = f" n_sub={n_sub}" if n_sub is not None else ""
                     cache = color(use_color, "dim", " [cache]") if cache_hit else ""
-                    print(f"  step  {tag} [{origin}] {c}{extra} ({round(elapsed_ms)}ms){cache}")
+                    print(f"  step  {tag} [{origin}] {c}{extra} ({round(elapsed_ms)}ms){cache}", flush=True)
                 if not ok: continue
                 score = n_sub if n_sub is not None else 9999
                 best_local.append((score, steps + [c], hint, n_sub))
@@ -541,6 +556,10 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
 
         if not new_beam:
             # Stuck — return current best partial
+            if trace:
+                print(color(use_color, "red",
+                    f"✗ STUCK at depth {depth_reached}: no candidate succeeded at this depth — returning partial."),
+                    flush=True)
             best = min(beam, key=lambda t: (t[0], len("\n".join(t[1]))))
             logger.finish(False, best[1], depth_reached, use_calls_count())
             if save_dir:
