@@ -22,17 +22,30 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-# Operators that strongly indicate a numeric goal.
+# Operators / functions that strongly indicate a numeric goal.
+# Includes:
+#   - arithmetic operators: + * / ≤ ≥ <= >= div mod
+#   - successor: Suc
+#   - number-theoretic helpers: gcd lcm
+#   - ordered-type functions: min max abs (need linorder/ord, otherwise
+#     `by simp` can't close even trivial identities like `max n n = n`)
 _NUMERIC_OPS = re.compile(
-    r'(?:\+|\*|/|≤|≥|<=|>=|\bdiv\b|\bmod\b|\bSuc\b|\bgcd\b|\blcm\b)'
+    r'(?:\+|\*|/|≤|≥|<=|>=|\bdiv\b|\bmod\b|\bSuc\b|\bgcd\b|\blcm\b'
+    r'|\bmin\b|\bmax\b|\babs\b)'
 )
 
 # Patterns that disqualify a goal from numeric annotation: list / set / option /
 # function operators, or anything that's clearly not numeric.
+# Added: take, drop, nth, butlast, last, tl, hd, distinct, sorted, append.
+# These are list operations whose presence means the goal's free variables
+# are list/element types, not nats. Previously these slipped through and the
+# annotator wrote nonsense like `(take::nat)` and `(xs::nat)`.
 _LIST_INDICATORS = re.compile(
     r'(?:\bset\b|\bmap\b|\brev\b|\blength\b|\bhd\b|\btl\b|\bconverse\b'
     r'|\bfilter\b|\bfold[lr]?\b|@|\[|\]|#|\bSome\b|\bNone\b|\bcard\b'
-    r'|\bUNIV\b|∈|∉|⊆|⊂|∪|∩|\\<in>|\\<subseteq>)'
+    r'|\bUNIV\b|∈|∉|⊆|⊂|∪|∩|\\<in>|\\<subseteq>'
+    r'|\btake\b|\bdrop\b|\bnth\b|\bbutlast\b|\blast\b|\bdistinct\b'
+    r'|\bsorted\b|\bappend\b|\bconcat\b|\bzip\b|\bremdups\b|\bsplit\b)'
 )
 
 # Already-annotated variables of the form (x::T) — we won't re-annotate these.
@@ -64,6 +77,12 @@ _RESERVED = frozenset({
     # Set/list-related (defensive — should be excluded by _LIST_INDICATORS anyway)
     "set", "map", "rev", "length", "hd", "tl", "card", "finite",
     "fst", "snd", "fold", "foldl", "foldr", "filter", "concat",
+    "take", "drop", "nth", "butlast", "last", "distinct", "sorted",
+    "append", "zip", "remdups", "split",
+    # Common list variables — these are list-typed, never nat-typed
+    "xs", "ys", "zs", "ws", "as", "bs",
+    # Common predicate / function variables
+    "p", "q", "f", "g", "h", "r", "s",
     "Some", "None", "the", "id",
     # Common one-letter type-class instance names that aren't free vars
     "x", "y", "z",  # NOTE: these CAN be free vars; only block when context unclear
@@ -115,6 +134,16 @@ def annotate_numeric_vars(goal: str, *, sort: str = "nat") -> str:
                 break
         else:
             effective_sort = existing_types[0]
+    else:
+        # Heuristic: if the goal uses unary negation (e.g. `-a`, `abs (-x)`)
+        # the default sort `nat` is wrong because nat has no negative numbers.
+        # Detect a `-` that's NOT preceded by an operand (i.e. it's unary) and
+        # default to `int` instead.
+        # Pattern: `-` at goal start, or preceded by `(`, `=`, `⟹`, `,`,
+        # a logical operator, or another arithmetic operator + whitespace.
+        # We approximate with: `(?:^|[(=⟹⟶⟷,∧∨¬<≤>≥+\-*/ ])\s*-\s*[A-Za-z]`.
+        if re.search(r"(?:^|[(=⟹⟶⟷,∧∨¬<≤>≥+\-*/ ])\s*-\s*[A-Za-z]", goal):
+            effective_sort = "int"
 
     seen: set[str] = set()
 
@@ -151,6 +180,8 @@ if __name__ == "__main__":
         "(x::real) + y = y + x",
         # Literal-only annotation: `(0::int)` must seed `a171` as int, not nat.
         "(0::int) ≤ abs a171",
+        # Unary minus: should default to `int`, not `nat` (nat has no negatives).
+        "abs (-a) = abs a",
     ]
     for s in samples:
         print(f"{s!r}\n  → {annotate_numeric_vars(s)!r}\n")

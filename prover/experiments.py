@@ -35,7 +35,25 @@ from typing import Any, Dict, List, Optional, Tuple
 from .isabelle_api import start_isabelle_server, get_isabelle_client, session_start as _session_start
 from .prover import prove_goal
 from .goal_typing import annotate_numeric_vars, looks_arithmetic
+from .goal_normalize import normalize_goal, normalization_report
 from . import config as CFG
+
+# Ablation toggle: set ABLATE_PREPROCESSING=1 to skip normalize_goal +
+# annotate_numeric_vars. Used by the ablation study to isolate the impact
+# of the goal-string repair pipeline.
+_ABLATE_PREPROCESSING = os.environ.get("ABLATE_PREPROCESSING") == "1"
+
+
+def _maybe_preprocess(g: str) -> tuple[str, str]:
+    """Return (new_goal, report_label_or_empty). Honours ABLATE_PREPROCESSING."""
+    if _ABLATE_PREPROCESSING:
+        return g, ""
+    orig = g
+    g = normalize_goal(g)
+    g = annotate_numeric_vars(g)
+    if g == orig:
+        return g, ""
+    return g, normalization_report(orig, g) or "annotated"
 
 def _silence_asyncio_transport_del():
     """Mute benign 'Event loop is closed' from BaseSubprocessTransport.__del__ at teardown."""
@@ -267,11 +285,14 @@ def cmd_bench(args: argparse.Namespace) -> None:
                             rnd = random.Random(base_seed + r)
                             rnd.shuffle(goals_run)
                         for i, g in enumerate(goals_run, 1):
-                            # Heuristic type annotation for bare arithmetic goals.
+                            # Normalize deprecated names & bad Unicode, then
+                            # annotate bare arithmetic goals.
                             _g_orig = g
+                            g = normalize_goal(g)
                             g = annotate_numeric_vars(g)
                             if g != _g_orig:
-                                print(f"[{cfg_name}] (run {r+1}/{args.repeats}) [{i}/{len(goals_run)}] {g}   (was: {_g_orig})")
+                                rep = normalization_report(_g_orig, g) or "annotated"
+                                print(f"[{cfg_name}] (run {r+1}/{args.repeats}) [{i}/{len(goals_run)}] {g}   (was: {_g_orig}  [{rep}])")
                             else:
                                 print(f"[{cfg_name}] (run {r+1}/{args.repeats}) [{i}/{len(goals_run)}] {g}")
                             rows.append(_bench_run_one(isabelle, session_id, g, cfg, single_model, models_ensemble))
@@ -436,16 +457,17 @@ def cmd_regress(args: argparse.Namespace) -> None:
                 rnd.shuffle(gs)
 
         for i, g in enumerate(gs, 1):
-            # Heuristic type annotation: many goal-file extractions strip the
-            # context that fixed variable types (e.g. `fix m n :: nat`). Without
-            # that, `m + n = n + m` is unprovable because Isabelle infers `'a`
-            # with only the `plus` typeclass. Annotate the first occurrence of
-            # each lowercase free variable with `::nat` when the goal looks
-            # arithmetic; leave list/set/propositional goals untouched.
+            # Two-stage goal preprocessing for benchmark files extracted
+            # without surrounding theory context:
+            #   1. normalize_goal:        deprecated names + bad-Unicode fixes
+            #   2. annotate_numeric_vars: add `::nat`/`::int` annotations to
+            #                             bare arithmetic free variables
             _g_orig = g
+            g = normalize_goal(g)
             g = annotate_numeric_vars(g)
             if g != _g_orig:
-                print(f"[{suite_name}] [{i}/{len(gs)}] {g}   (was: {_g_orig})")
+                rep = normalization_report(_g_orig, g) or "annotated"
+                print(f"[{suite_name}] [{i}/{len(gs)}] {g}   (was: {_g_orig}  [{rep}])")
             else:
                 print(f"[{suite_name}] [{i}/{len(gs)}] {g}")
             res = prove_goal(

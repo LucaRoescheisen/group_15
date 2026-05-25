@@ -15,3 +15,6 @@ isabelle_server.log
 # OS
 .DS_Store
 Thumbs.db
+
+logs/
+datasets/

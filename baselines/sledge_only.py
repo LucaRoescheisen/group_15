@@ -313,21 +313,40 @@ def main() -> None:
     isabelle = get_isabelle_client(server_info)
     try:
         session_resps = isabelle.session_start(session="HOL")
-        # Extract session_id from the FINISHED response
+        # Extract session_id. Different isabelle_client versions return either:
+        #   (a) a plain string UUID (older / "v1.0.x" style), or
+        #   (b) a list of IsabelleResponse with a FINISHED entry whose
+        #       response_body has a session_id attribute / dict key.
         session_id = None
-        for r in session_resps:
-            rt = _response_type(r)
-            if "FINISHED" in rt:
+        if isinstance(session_resps, str):
+            # Case (a): the response IS the session_id.
+            session_id = session_resps.strip() or None
+        elif isinstance(session_resps, (list, tuple)):
+            # Case (b): scan for FINISHED with session_id.
+            for r in session_resps:
                 body = getattr(r, "response_body", None)
-                if hasattr(body, "session_id"):
-                    session_id = body.session_id
+                if body is None:
+                    continue
+                sid = getattr(body, "session_id", None)
+                if sid:
+                    session_id = str(sid)
                     break
-                d = _decode_body(body)
-                if "session_id" in d:
-                    session_id = d["session_id"]
+                if isinstance(body, dict) and "session_id" in body:
+                    session_id = str(body["session_id"])
                     break
+                if hasattr(body, "model_dump"):
+                    try:
+                        d = body.model_dump()
+                        if "session_id" in d:
+                            session_id = str(d["session_id"])
+                            break
+                    except Exception:
+                        pass
+        else:
+            # Defensive fallback: stringify whatever we got and hope it's a UUID-ish thing.
+            session_id = str(session_resps).strip() or None
         if not session_id:
-            print(f"ERROR: Could not extract session_id from: {session_resps}")
+            print(f"ERROR: Could not extract session_id from: {session_resps!r}")
             try:
                 proc.terminate()
             except Exception:
@@ -344,6 +363,7 @@ def main() -> None:
 
     ok = 0
     times: List[float] = []
+    suite_t0 = time.time()
     try:
         for i, g in enumerate(goals, 1):
             print(f"[{i}/{len(goals)}] {g}", flush=True)
@@ -372,11 +392,22 @@ def main() -> None:
         except Exception:
             pass
 
+    total_s = time.time() - suite_t0
     mid = sorted(times)[len(times) // 2] if times else 0.0
     avg = sum(times) / len(times) if times else 0.0
+
+    # Human-readable total: HhMmSs / MmSs / Ss
+    if total_s >= 3600:
+        total_hms = f"{int(total_s // 3600)}h{int((total_s % 3600) // 60):02d}m{int(total_s % 60):02d}s"
+    elif total_s >= 60:
+        total_hms = f"{int(total_s // 60)}m{int(total_s % 60):02d}s"
+    else:
+        total_hms = f"{total_s:.1f}s"
+
     print("\n=== Summary ===")
     print(f"Success: {ok}/{len(goals)} ({ok / max(1, len(goals)) * 100:.1f}%)")
     print(f"Median time: {mid:.1f}s | Average time: {avg:.1f}s")
+    print(f"Total wall time: {total_hms} ({total_s:.1f}s)")
 
 if __name__ == "__main__":
     main()

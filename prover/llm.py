@@ -350,16 +350,35 @@ def propose_steps(
         # Only add nat-induction if a likely nat variable / Suc / arithmetic is present.
         if re.search(r"\bSuc\b|\bn\b|\bm\b|\b[a-z][0-9]+\b\s*[+\-*]|\b(div|mod)\b", haystack):
             fb.extend(["apply (induction n)", "apply (cases n)"])
-        # Definition-unfolding finishers — cheap and often decisive for
+
+        # Relation predicates: goals about `refl`, `sym`, `trans`, `antisym`,
+        # converse `r¯¹`, composition `r O s`, image `r `` s` typically need
+        # the predicate definitions unfolded. `auto` alone rarely suffices.
+        if re.search(r"\b(refl|refl_on|sym|antisym|trans|irrefl|asym)\b|¯¹|\bconverse\b", haystack):
+            fb.append("apply (auto simp: refl_on_def sym_def antisym_def trans_def converse_def)")
+            fb.append("apply (auto simp: converse_def)")
+        # Cardinality / finite-set goals: need specific named lemmas (the
+        # `_def` route doesn't help here because `card` isn't unfolded by def).
+        # Instead, propose `auto` with the most useful library lemmas added.
+        if re.search(r"\bcard\b|\bPow\b", haystack):
+            fb.append("apply (auto simp: card_insert_if card_Un_Int card_image card_mono)")
+            fb.append("apply (auto simp: card_Pow)")
+        # Image-set goals (`f ` A`, `f -` A`): inj/surj-aware tactics often help.
+        if re.search(r"`\s*[A-Z]|\bf\s*-`|\binj_on\b|\bbij_betw\b", haystack):
+            fb.append("apply (auto simp: inj_on_def bij_betw_def image_def vimage_def)")
+
+        # Generic definition-unfolding finishers — cheap and often decisive for
         # goals over named predicates like `inj`, `bij_betw`, `surj`, ...
         for stem in re.findall(r"\b([a-z][a-z_]{2,})\b", goal):
             if stem in {"set", "map", "rev", "length", "card", "hd", "tl",
                         "fst", "snd", "the", "some", "none", "true", "false",
-                        "and", "or", "not"}:
+                        "and", "or", "not", "div", "mod", "abs", "min", "max",
+                        # Skip stems we've already covered with curated lemmas above
+                        "refl", "sym", "trans", "antisym", "converse"}:
                 continue
             fb.append(f"apply (auto simp: {stem}_def)")
             # Only inject the first ~2 unique stems to keep the list short.
-            if sum(1 for x in fb if "_def" in x) >= 2:
+            if sum(1 for x in fb if x.startswith("apply (auto simp:") and "_def" in x.split("simp:")[1]) >= 4:
                 break
         return fb
 

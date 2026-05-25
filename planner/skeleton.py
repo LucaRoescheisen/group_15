@@ -190,15 +190,28 @@ def _gemini_cli_available() -> bool:
     return which("gemini") is not None
 
 def _gemini_cli_generate_simple(prompt: str, model_id: str, *, timeout_s: Optional[int] = None) -> str:
+    """Invoke the `gemini` CLI to generate text.
+
+    NOTE: pass the prompt via the `-p` flag (NOT stdin). The stdin form is
+    rejected by some Gemini CLI versions, which previously caused the planner
+    to silently fall back to REST and then 400 on `gemini-3-flash-preview`
+    (the prover uses `-p` and worked fine; matching that behaviour here).
+    Honours GEMINI_CLI_BIN env var, like the prover does.
+    """
     import subprocess
-    cmd = ["gemini", "-m", model_id]
+    from shutil import which
+    bin_path = os.getenv("GEMINI_CLI_BIN", "gemini")
+    if which(bin_path) is None:
+        raise RuntimeError(f"gemini CLI not found at {bin_path!r}")
+    cmd = [bin_path, "-m", model_id, "-p", prompt]
     proc = subprocess.run(
-        cmd, input=prompt, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, timeout=timeout_s or OLLAMA_TIMEOUT_S, env=os.environ.copy()
+        cmd, input=b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=timeout_s or OLLAMA_TIMEOUT_S, env=os.environ.copy()
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"gemini CLI failed ({proc.returncode}): {(proc.stderr or proc.stdout).strip()}")
-    return proc.stdout.strip()
+        msg = (proc.stderr or proc.stdout).decode("utf-8", "ignore").strip()
+        raise RuntimeError(f"gemini CLI failed ({proc.returncode}): {msg}")
+    return proc.stdout.decode("utf-8", "ignore").strip()
 
 def _gemini_rest_generate_simple(prompt: str, model_id: str, *, timeout_s: Optional[int] = None) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
@@ -221,22 +234,55 @@ def _gemini_rest_generate_simple(prompt: str, model_id: str, *, timeout_s: Optio
     return str(data).strip()
 
 def _gemini_generate_simple(prompt: str, model_id: str, *, timeout_s: Optional[int] = None) -> str:
+    """Call Gemini for the *user-requested* model only (no silent model swap).
+
+    Order of attempts (all on the SAME model — mirrors `prover.llm.py`'s
+    `_gemini_generate` which is the proven-working path on this codebase):
+
+      1. REST first when GEMINI_API_KEY is set. Many CLI versions wrap REST,
+         so going direct is faster and skips subprocess overhead. Returns
+         immediately if it succeeds.
+      2. CLI fallback. The CLI knows model aliases (e.g. resolves `*-preview`
+         names) that REST sometimes doesn't, so it covers names REST rejects
+         with 400.
+      3. If both fail, raise the original exception.
+
+    Set GEMINI_FALLBACK_MODEL=<name> to opt back into the old behaviour of
+    silently switching to a *different* model on failure. Off by default
+    because it makes trace output misleading.
+    """
     resolved = _gemini_resolve_model_id(model_id, timeout_s=timeout_s)
+    last_exc: Optional[Exception] = None
+
+    # Attempt 1: REST (matches prover order — REST first, CLI as fallback).
+    if os.getenv("GEMINI_API_KEY"):
+        try:
+            return _gemini_rest_generate_simple(prompt, resolved, timeout_s=timeout_s)
+        except Exception as e:
+            last_exc = e
+
+    # Attempt 2: CLI (covers model names REST doesn't recognise, e.g. preview ids).
     if _gemini_cli_available():
         try:
             return _gemini_cli_generate_simple(prompt, resolved, timeout_s=timeout_s)
-        except Exception:
-            pass
-    try:
-        return _gemini_rest_generate_simple(prompt, resolved, timeout_s=timeout_s)
-    except Exception:
-        fallback = "gemini-2.5-pro"
+        except Exception as e:
+            last_exc = e
+
+    # Optional explicit fallback to a different model (off by default).
+    fallback = os.environ.get("GEMINI_FALLBACK_MODEL", "").strip()
+    if fallback and fallback != resolved:
+        if os.getenv("GEMINI_API_KEY"):
+            try:
+                return _gemini_rest_generate_simple(prompt, fallback, timeout_s=timeout_s)
+            except Exception as e:
+                last_exc = e
         if _gemini_cli_available():
             try:
                 return _gemini_cli_generate_simple(prompt, fallback, timeout_s=timeout_s)
-            except Exception:
-                pass
-        return _gemini_rest_generate_simple(prompt, fallback, timeout_s=timeout_s)
+            except Exception as e:
+                last_exc = e
+
+    raise last_exc or RuntimeError("Gemini generation failed (no exception captured)")
 
 def _generate_simple(
     prompt: str,
