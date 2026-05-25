@@ -266,6 +266,18 @@ def _generate_for_model(
     """
     _log(f"route: {detect_backend_for_model(model)}")
     if model.startswith("gemini:"):
+        # Honour the planner's per-goal LLM call cap (defined in
+        # planner/skeleton.py). When the planner calls prove_goal during
+        # hole-filling, this routes through here — without this check,
+        # the prover's beam search can make 30-50 LLM calls per hole that
+        # bypass the planner's budget and exhaust the daily API quota.
+        try:
+            from planner.skeleton import _check_llm_budget, GoalLLMBudgetExhausted
+            _check_llm_budget()
+        except GoalLLMBudgetExhausted:
+            raise
+        except ImportError:
+            pass  # prover used standalone (no planner) → no cap to enforce
         return _gemini_generate(system_prompt, user_prompt, model.split(":", 1)[1])
 
     if model.startswith("hf:"):

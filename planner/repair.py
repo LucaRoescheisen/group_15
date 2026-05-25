@@ -360,6 +360,13 @@ def _hf_generate(prompt: str, model_id: str, timeout_s: int, *, temperature: Opt
     return _sanitize_llm_block(result.strip())
 
 def _gemini_generate(prompt: str, model_id: str, timeout_s: int, *, temperature: Optional[float] = None) -> str:
+    # Honour the per-goal LLM call cap defined in planner.skeleton to prevent
+    # repair cascades from burning the whole day's quota on one unprovable goal.
+    try:
+        from planner.skeleton import _check_llm_budget
+        _check_llm_budget()
+    except ImportError:
+        pass
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set")

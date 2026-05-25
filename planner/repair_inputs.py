@@ -98,10 +98,20 @@ def _extract_print_state_from_responses(resps: List) -> str:
         return standard + "\n" + "\n".join(llm_lines)
     return standard or "\n".join(llm_lines)
 
-def _quick_state_and_errors(isabelle, session: str, full_text: str) -> Tuple[str, List[dict]]:
+def _quick_state_and_errors(
+    isabelle, session: str, full_text: str, *, timeout_s: Optional[int] = None,
+) -> Tuple[str, List[dict]]:
+    """Build the proof script and report (print_state, errors).
+
+    `timeout_s` is accepted as a kwarg for compatibility with callers in
+    `planner/repair.py` that pass it; if None, falls back to
+    `_ISA_FAST_TIMEOUT_S`. Previously this signature lacked the kwarg, which
+    caused `try_cegis_repairs` to crash with TypeError on every repair attempt.
+    """
+    eff_timeout = timeout_s if timeout_s is not None else _ISA_FAST_TIMEOUT_S
     try:
         thy = build_theory(full_text.splitlines(), add_print_state=True, end_with=None)
-        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=_ISA_FAST_TIMEOUT_S)
+        resps = _run_theory_with_timeout(isabelle, session, thy, timeout_s=eff_timeout)
         state = _extract_print_state_from_responses(resps)
         errors: List[dict] = []
         

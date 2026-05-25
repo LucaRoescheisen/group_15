@@ -141,7 +141,7 @@ run() {
 
 # ----- Tier 1: Planner -----
 PLAN_FLAGS='--mode auto --diverse --k 3 --temps "0.35,0.55,0.85" --strict-no-sorry --verify \
-            --model qwen3:8b --shuffle --seed 42 --trace'
+            --model gemini:gemini-3-flash-preview --shuffle --seed 42 --trace'
 
 #run "t1_planner_lists" bash -c "
 #  python -u -m planner.experiments bench --file datasets/lists.txt --timeout 60 $PLAN_FLAGS \
@@ -168,10 +168,10 @@ PLAN_FLAGS='--mode auto --diverse --k 3 --temps "0.35,0.55,0.85" --strict-no-sor
 #    2>&1 | tee logs/t1_planner_easy_test.log
 #"
 
-run "t1_planner_mid_test" bash -c "
-  python -u -m planner.experiments bench --file datasets/hol_main_mid_goals_test.txt --timeout 120 $PLAN_FLAGS \
-    2>&1 | tee logs/t1_planner_mid_test.log
-"
+#run "t1_planner_mid_test" bash -c "
+#  python -u -m planner.experiments bench --file datasets/hol_main_mid_goals_test.txt --timeout 120 $PLAN_FLAGS \
+#    2>&1 | tee logs/t1_planner_mid_test.log
+#"
 
 run "t1_planner_hard_test" bash -c "
   python -u -m planner.experiments bench --file datasets/hol_main_hard_goals_test.txt --timeout 200 $PLAN_FLAGS \
@@ -182,21 +182,21 @@ run "t1_planner_hard_test" bash -c "
 run "t2_no_repairs" bash -c "
   python -u -m planner.experiments bench --file datasets/hol_main_mid_goals_test.txt --timeout 120 \
     --mode auto --diverse --k 3 --temps '0.35,0.55,0.85' --strict-no-sorry --verify --no-repairs \
-    --model gemini:gemini-3-flash-preview --shuffle --seed 42 --trace \
+    --model gemini:gemini-2.5-flash --shuffle --seed 42 --trace \
     2>&1 | tee logs/t2_no_repairs.log
 "
 
 run "t2_no_preprocess" bash -c "
   ABLATE_PREPROCESSING=1 python -u -m planner.experiments bench --file datasets/hol_main_mid_goals_test.txt --timeout 120 \
     --mode auto --diverse --k 3 --temps '0.35,0.55,0.85' --strict-no-sorry --verify \
-    --model gemini:gemini-3-flash-preview --shuffle --seed 42 --trace \
+    --model gemini:gemini-2.5-flash --shuffle --seed 42 --trace \
     2>&1 | tee logs/t2_no_preprocess.log
 "
 
 run "t2_no_sledge" bash -c "
   python -u -m prover.experiments bench --file datasets/hol_main_mid_goals_test.txt --timeout 120 \
     --beam 3 --max-depth 6 --facts-limit 6 --reranker on --no-minimize \
-    --model gemini:gemini-3-flash-preview --shuffle --seed 42 \
+    --model gemini:gemini-2.5-flash --shuffle --seed 42 \
     2>&1 | tee logs/t2_no_sledge.log
 "
 

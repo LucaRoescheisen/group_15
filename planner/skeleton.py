@@ -233,6 +233,36 @@ def _gemini_rest_generate_simple(prompt: str, model_id: str, *, timeout_s: Optio
         pass
     return str(data).strip()
 
+# --- Per-goal LLM call budget ---------------------------------------------
+# Prevents a single unprovable goal from making hundreds of LLM calls during
+# repair cascades and exhausting the daily quota for the whole benchmark.
+# Defaults to 25 — enough for any legitimate goal (3 outlines + ~5 fill calls
+# + ~10 repair calls) but caps runaway repair loops.
+# Set MAX_LLM_CALLS_PER_GOAL=<n> to override; set to 0 to disable.
+_MAX_LLM_CALLS_PER_GOAL = int(os.environ.get("MAX_LLM_CALLS_PER_GOAL", "25"))
+_GOAL_LLM_CALL_COUNT = 0  # reset by plan_and_fill at goal entry
+
+
+def reset_goal_llm_budget() -> None:
+    """Reset per-goal LLM call counter. Called by plan_and_fill on entry."""
+    global _GOAL_LLM_CALL_COUNT
+    _GOAL_LLM_CALL_COUNT = 0
+
+
+class GoalLLMBudgetExhausted(RuntimeError):
+    """Raised when a single goal exceeds MAX_LLM_CALLS_PER_GOAL Gemini calls."""
+
+
+def _check_llm_budget() -> None:
+    global _GOAL_LLM_CALL_COUNT
+    _GOAL_LLM_CALL_COUNT += 1
+    if _MAX_LLM_CALLS_PER_GOAL > 0 and _GOAL_LLM_CALL_COUNT > _MAX_LLM_CALLS_PER_GOAL:
+        raise GoalLLMBudgetExhausted(
+            f"Per-goal LLM call cap reached ({_MAX_LLM_CALLS_PER_GOAL}); "
+            f"aborting to preserve quota for remaining goals."
+        )
+
+
 def _gemini_generate_simple(prompt: str, model_id: str, *, timeout_s: Optional[int] = None) -> str:
     """Call Gemini for the *user-requested* model only (no silent model swap).
 
@@ -251,6 +281,7 @@ def _gemini_generate_simple(prompt: str, model_id: str, *, timeout_s: Optional[i
     silently switching to a *different* model on failure. Off by default
     because it makes trace output misleading.
     """
+    _check_llm_budget()
     resolved = _gemini_resolve_model_id(model_id, timeout_s=timeout_s)
     last_exc: Optional[Exception] = None
 
@@ -260,13 +291,20 @@ def _gemini_generate_simple(prompt: str, model_id: str, *, timeout_s: Optional[i
             return _gemini_rest_generate_simple(prompt, resolved, timeout_s=timeout_s)
         except Exception as e:
             last_exc = e
+            # Make the silent REST failure VISIBLE in the trace so we can tell
+            # whether REST is being skipped, failing, or working.
+            print(f"[gemini] REST failed for model={resolved!r}: {type(e).__name__}: {str(e)[:200]}", flush=True)
+    else:
+        print(f"[gemini] REST skipped: GEMINI_API_KEY not set in process env", flush=True)
 
     # Attempt 2: CLI (covers model names REST doesn't recognise, e.g. preview ids).
     if _gemini_cli_available():
+        print(f"[gemini] Falling back to CLI for model={resolved!r}", flush=True)
         try:
             return _gemini_cli_generate_simple(prompt, resolved, timeout_s=timeout_s)
         except Exception as e:
             last_exc = e
+            print(f"[gemini] CLI failed for model={resolved!r}: {type(e).__name__}: {str(e)[:200]}", flush=True)
 
     # Optional explicit fallback to a different model (off by default).
     fallback = os.environ.get("GEMINI_FALLBACK_MODEL", "").strip()

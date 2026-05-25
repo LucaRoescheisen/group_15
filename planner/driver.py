@@ -632,6 +632,14 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
     t0 = time.monotonic()
     left_s = lambda: max(0.0, timeout - (time.monotonic() - t0))
 
+    # Reset per-goal LLM call budget so runaway repair loops on one goal
+    # can't exhaust the daily quota for the rest of the suite.
+    try:
+        from planner.skeleton import reset_goal_llm_budget
+        reset_goal_llm_budget()
+    except ImportError:
+        pass
+
     restart_count = 0
 
     def _restart_isabelle(reason: str, ex: Optional[BaseException] = None) -> None:
@@ -654,6 +662,32 @@ def plan_and_fill(goal: str, model: Optional[str] = None, timeout: int = 100, *,
         isa, session, proc = isa2, session2, proc2
 
     try:
+        # PARSE-ERROR FAST-FAIL
+        # If the lemma statement itself doesn't parse in Isabelle, NO amount
+        # of LLM-driven outline/fill/repair can fix it — repair tactics
+        # transform the proof, not the lemma. Detecting this early avoids
+        # burning LLM quota on goals that are guaranteed to fail.
+        # We probe with `sorry` (always-accepts-the-claim tactic): if even
+        # `sorry` produces "Failed to parse prop" / "Inner syntax error",
+        # the goal's prop is malformed and we abort the goal cleanly.
+        try:
+            from planner.repair_inputs import _quick_state_and_errors
+            _probe = f'lemma "{goal}"\n  sorry\n'
+            _, _probe_errs = _quick_state_and_errors(isa, session, _probe, timeout_s=8)
+            _err_blob = " ".join(
+                (e.get("text", "") if isinstance(e, dict) else str(e))
+                for e in (_probe_errs or [])
+            )
+            if "Failed to parse prop" in _err_blob or "Inner syntax error" in _err_blob:
+                if trace:
+                    print(f"[planner] ❌ goal parse-error (Isabelle rejects prop); skipping LLM/repair to save quota")
+                    print(f"[planner]   error sample: {_err_blob[:200]}")
+                return PlanAndFillResult(False, f'lemma "{goal}"\n  sorry\n', [], [0])
+        except Exception as _probe_ex:
+            # Probe failure is non-fatal — continue with normal flow.
+            if trace:
+                print(f"[planner] parse-check probe failed (non-fatal): {type(_probe_ex).__name__}: {_probe_ex}")
+
         # TOP-LEVEL FINISHER PROBE
         # Many lemmas in standard benchmark suites are one-liners — provable
         # directly by `by auto` / `by simp` / `by force` / etc. at the top
