@@ -259,19 +259,19 @@ python -m prover.train_reranker --algo dqn --epochs 12 --batch 2048 --gamma 0.92
 Combining the above in curriculum training
 ```bash
 # Create data for easy stage
-python -m prover.experiments bench --file datasets/hol_main_easy_goals.txt --beam 3 --max-depth 6 --timeout 120 --facts-limit 6 --quickcheck --nitpick --reranker on --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+python -m prover.experiments bench --file datasets/hol_main_easy_goals.txt --beam 3 --max-depth 6 --timeout 120 --facts-limit 6 --quickcheck --nitpick --reranker on --variants --no-minimize --model "gemini:gemini-3-flash-preview" --shuffle
 # Train a bandit classifier
 python -m prover.train_reranker --algo xgb-classifier --target bandit
 
 # Create data for mid stage
-python -m prover.experiments bench --file datasets/hol_main_mid_goals.txt --beam 4 --max-depth 8 --timeout 120 --facts-limit 6 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+python -m prover.experiments bench --file datasets/hol_main_mid_goals.txt --beam 4 --max-depth 8 --timeout 120 --facts-limit 6 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "gemini:gemini-3-flash-preview" --shuffle
 # Re-train bandit classifier
 python -m prover.train_reranker --algo xgb-classifier --target bandit
 # And also train a Q-style regressor
 python -m prover.train_reranker --algo xgb-regressor --target q
 
 # Create data for hard stage
-python -m prover.experiments bench --file datasets/hol_main_hard_goals.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+python -m prover.experiments bench --file datasets/hol_main_hard_goals.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "gemini:gemini-3-flash-preview" --shuffle
 # Retrain Q-style regressor
 python -m prover.train_reranker --algo xgb-regressor --target q
 # Train AWR++ with teacher knowledge distillation
@@ -451,7 +451,7 @@ Extract a data corpus for the planner from AFP (replace the path to afp thys wit
 ```bash
 python - <<'PY'
 from planner.extract import mine_afp_corpus_rich
-mine_afp_corpus_rich(src_dir="/path/to/afp/thys", out_jsonl="datasets/isar_pairs_afp.jsonl")
+mine_afp_corpus_rich(src_dir="/home/supal/afp/thys", out_jsonl="datasets/isar_pairs_afp.jsonl")
 PY
 ```
 
@@ -553,10 +553,10 @@ export ISABELLE_LOGIC=MiniF2F_Base
 Run the prover on the validation datasets
 ```bash
 # Validation 
-ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/mini_f2f/mini_f2f_validation.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/mini_f2f/mini_f2f_validation.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3:8b" --shuffle --seed 42
 
 # Testing
-ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/mini_f2f/mini_f2f_test.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3-coder:30b" --shuffle
+ISABELLE_LOGIC=MiniF2F_Base python -m prover.experiments bench --file datasets/mini_f2f/mini_f2f_test.txt --beam 5 --max-depth 10 --timeout 200 --facts-limit 8 --quickcheck --nitpick --reranker on --sledge --variants --no-minimize --model "qwen3:8b" --shuffle
 ```
 
 Maybe train rerankers using on the logs from the validation set, and then run the test set to see results. 
@@ -569,7 +569,7 @@ python -m planner.experiments bench \
   --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
   --timeout 200 --strict-no-sorry --verify \
   --context-hints --hintlex datasets/isar_hintlex.json --priors datasets/isar_priors.json \
-  --model "qwen3-coder:30b" --shuffle --seed 42
+  --model "qwen3:8b" --shuffle --seed 42
 
 # Testing
 python -m planner.experiments bench \  
@@ -577,7 +577,7 @@ python -m planner.experiments bench \
   --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
   --timeout 200 --strict-no-sorry --verify \
   --context-hints --hintlex datasets/isar_hintlex.json --priors datasets/isar_priors.json \
-  --model "qwen3-coder:30b" --shuffle --seed 42
+  --model "qwen3:8b" --shuffle --seed 42
 ```
 
 **PutnamBench**

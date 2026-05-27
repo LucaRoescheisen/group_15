@@ -3,8 +3,8 @@ session "MiniF2F_Base" = HOL +
   sessions
     "HOL-Number_Theory"
     "HOL-Computational_Algebra"
-    "HOL-Analysis"
+    (* "HOL-Analysis"  -- dropped to fit in WSL memory *)
     "HOL-Library"
-    "Symmetric_Polynomials" 
+    (* "Symmetric_Polynomials" -- AFP entry not installed *)
   theories
     MiniF2F_Base

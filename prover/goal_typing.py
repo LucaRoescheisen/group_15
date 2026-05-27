@@ -45,7 +45,13 @@ _LIST_INDICATORS = re.compile(
     r'|\bfilter\b|\bfold[lr]?\b|@|\[|\]|#|\bSome\b|\bNone\b|\bcard\b'
     r'|\bUNIV\b|∈|∉|⊆|⊂|∪|∩|\\<in>|\\<subseteq>'
     r'|\btake\b|\bdrop\b|\bnth\b|\bbutlast\b|\blast\b|\bdistinct\b'
-    r'|\bsorted\b|\bappend\b|\bconcat\b|\bzip\b|\bremdups\b|\bsplit\b)'
+    r'|\bsorted\b|\bappend\b|\bconcat\b|\bzip\b|\bremdups\b|\bsplit\b'
+    # Set/sum/product/interval syntax — { ... }, sum/prod functions, intervals
+    # like `{..<n}`. Without this, goals like `sum f {..<n} = ...` get
+    # treated as arithmetic and `sum` gets annotated as `::nat`.
+    r'|\{|\}|\bsum\b|\bprod\b|\bSup\b|\bInf\b|\bSUM\b|\bPROD\b'
+    r'|\bMAX\b|\bMIN\b|\bLEAST\b|\bGREATEST\b'
+    r'|\.\.<|\.\.|<\.\.)'
 )
 
 # Already-annotated variables of the form (x::T) — we won't re-annotate these.
@@ -79,6 +85,32 @@ _RESERVED = frozenset({
     "fst", "snd", "fold", "foldl", "foldr", "filter", "concat",
     "take", "drop", "nth", "butlast", "last", "distinct", "sorted",
     "append", "zip", "remdups", "split",
+    # Higher-order math functions (returning ranged values; never nat-typed
+    # at the head position even when the result is a nat)
+    "sum", "prod", "Sup", "Inf", "SUM", "PROD", "MAX", "MIN",
+    "LEAST", "GREATEST", "image", "vimage", "inv", "inv_into",
+    "Domain", "Range", "Field", "trancl", "rtrancl", "converse",
+    "inj", "inj_on", "surj", "bij", "bij_betw", "refl", "sym",
+    "trans", "antisym", "asym", "irrefl", "acyclic",
+    # Numeric/analytic functions (MiniF2F-heavy). Annotating these as `::nat`
+    # or `::real` corrupts the term: `(floor::real) (x/y)` is parsed as a real
+    # applied to `(x/y)`, which is a type error and fails as
+    # `Undefined type name: real`.
+    "floor", "ceiling", "round", "frac", "sqrt", "root", "ln", "log",
+    "exp", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+    "sinh", "cosh", "tanh", "sgn", "norm", "fact", "binomial",
+    "of_int", "of_nat", "of_real", "real_of_nat", "real_of_int",
+    "numeral", "power", "pow", "Re", "Im", "cnj", "ii",
+    # Combinatorics infix constants. `n choose k` is binomial coefficient,
+    # `choose` is a constant, not a free var. Annotating as `(choose::nat)`
+    # produces `n (choose::nat) k` which fails to parse.
+    "choose", "div_mod", "dvd", "coprime",
+    # Arithmetic constants that take an argument (Isabelle's `inverse`,
+    # `uminus`, etc.) — `(inverse::real)` mangles to `(inverse::real) 8`
+    # which Isabelle reads as the constant `inverse` ascribed to type `real`
+    # then applied to 8, failing with `Undefined type name: real`.
+    "inverse", "uminus", "plus", "minus", "times", "divide",
+    "even", "odd", "prime", "Max", "Min",
     # Common list variables — these are list-typed, never nat-typed
     "xs", "ys", "zs", "ws", "as", "bs",
     # Common predicate / function variables
@@ -151,9 +183,30 @@ def annotate_numeric_vars(goal: str, *, sort: str = "nat") -> str:
         var = m.group(1)
         if var in _RESERVED_HARD or var in already or var in seen:
             return var
-        # Heuristic: skip if the var is preceded by a backslash (Isabelle escape).
-        start, _ = m.span()
+        # Heuristic: skip if the var is preceded by a backslash (Isabelle escape),
+        # OR if it sits inside an Isabelle ASCII escape like `\<sigma>`, `\<forall>`.
+        # In `\<sigma>` the char immediately before `sigma` is `<`, not `\` — so we
+        # also check for `<` preceded by `\`. Without this guard the annotator
+        # rewrites `\<sigma>` → `\<(sigma::real)>`, which is invalid Isabelle and
+        # causes every downstream `by ...` to parse-fail with
+        # `Malformed symbolic character: "\<"`.
+        start, end = m.span()
         if start > 0 and goal[start - 1] == "\\":
+            return var
+        if start >= 2 and goal[start - 1] == "<" and goal[start - 2] == "\\":
+            return var
+        # Also skip if immediately followed by `>` and preceded somewhere by `\<`
+        # within the last few chars (covers `\<forall>` even if regex word-boundary
+        # interacts oddly).
+        if end < len(goal) and goal[end] == ">" and "\\<" in goal[max(0, start - 3):start]:
+            return var
+        # Heuristic: if the "var" is immediately followed by `(` (optionally
+        # after whitespace), it's a function application — `foo (x+y)` means
+        # foo is being called, so foo is a constant, not a free var to type.
+        # This catches math functions we forgot to list in _RESERVED
+        # (e.g. an LLM-generated goal using `arctan (...)`).
+        tail = goal[end:end + 4]
+        if re.match(r"\s*\(", tail):
             return var
         seen.add(var)
         return f"({var}::{effective_sort})"
@@ -182,6 +235,14 @@ if __name__ == "__main__":
         "(0::int) ≤ abs a171",
         # Unary minus: should default to `int`, not `nat` (nat has no negatives).
         "abs (-a) = abs a",
+        # Isabelle ASCII escapes — `sigma`/`forall` inside `\<...>` MUST NOT be
+        # rewritten as `\<(sigma::real)>` (breaks the symbolic char and causes
+        # downstream `by` to parse-fail).
+        r"bij \<sigma> ⟹ \<forall> x. \<sigma> x = 5 * x - 12 ⟹ x = 47 / 24",
+        # `floor` is a constant (function), not a free var — must NOT be
+        # annotated as `(floor::real)`, which would make Isabelle complain
+        # `Undefined type name: real` because `floor :: 'a => int`.
+        "⋀x y. f x y = x - y * floor (x/y) ⟹ f ((3::real)/8) (- 2/5) = - 1/40",
     ]
     for s in samples:
         print(f"{s!r}\n  → {annotate_numeric_vars(s)!r}\n")

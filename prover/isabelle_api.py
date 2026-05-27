@@ -175,15 +175,26 @@ def run_theory(
     _use_calls += 1
     _last_call_timed_out = False
 
-    tmpdir = tempfile.TemporaryDirectory()
+    # Optional override: if SCRATCH_MASTER_DIR is set, write Scratch.thy there
+    # instead of a tempdir. This is required when the inline lemma imports a
+    # local theory file (e.g. `imports MiniF2F_Base`) so Isabelle's theory
+    # loader can resolve it relative to the master_dir. Tempdir is cleaned up
+    # only when we created it.
+    _override_dir = os.environ.get("SCRATCH_MASTER_DIR") or ""
+    tmpdir = None
+    if _override_dir and os.path.isdir(_override_dir):
+        master_dir_real = _override_dir
+    else:
+        tmpdir = tempfile.TemporaryDirectory()
+        master_dir_real = tmpdir.name
     try:
-        p = os.path.join(tmpdir.name, "Scratch.thy")
+        p = os.path.join(master_dir_real, "Scratch.thy")
         with open(p, "w", encoding="utf-8") as f:
             f.write(theory_text)
 
         # On Windows, Isabelle runs inside Cygwin via the wrapper bat.
         # The server needs Cygwin-style paths (/cygdrive/c/...).
-        master_dir = tmpdir.name
+        master_dir = master_dir_real
         if os.name == "nt":
             import re as _re
             s = master_dir.replace("\\", "/")
@@ -214,7 +225,14 @@ def run_theory(
         # No timeout requested → direct call
         return list(isabelle.use_theories(theories=["Scratch"], session_id=session_id, master_dir=master_dir))
     finally:
-        tmpdir.cleanup()
+        if tmpdir is not None:
+            tmpdir.cleanup()
+        else:
+            # Override dir is reused; just remove the Scratch.thy we wrote.
+            try:
+                os.remove(p)
+            except Exception:
+                pass
 
 
 def last_call_timed_out() -> bool:

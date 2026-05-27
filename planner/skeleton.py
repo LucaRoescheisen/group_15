@@ -4,6 +4,7 @@ from typing import List, Tuple, Optional, Any, Dict, Iterable
 import json
 import os
 import re
+import sys
 import time as _time
 from functools import lru_cache
 from planner.prompts import SKELETON_PROMPT
@@ -172,6 +173,128 @@ def _gemini_list_models_cached(api_key: str) -> List[str]:
     except Exception:
         return []
 
+# ---------------------------------------------------------------------------
+# REQUEST TRACKER
+# ---------------------------------------------------------------------------
+# Tracks every Gemini call (REST + CLI), grouped by transport and HTTP status.
+# Surfaces:
+#   - total calls per transport
+#   - rolling rate (last 60s and last 5min)
+#   - response-code breakdown (200 / 429 / 503 / etc.)
+#   - cumulative input/output tokens (for REST, when usageMetadata is returned)
+#
+# Usage:
+#   - Stats automatically printed every N calls (default 10) when LLM_TRACK_VERBOSE=1
+#   - At any time: `from planner.skeleton import print_request_stats; print_request_stats()`
+#   - Stats also written to logs/request_stats.jsonl (append-mode) for postmortem.
+# ---------------------------------------------------------------------------
+from collections import deque
+import threading
+import json as _json
+import time as _time_for_tracker
+
+_REQ_LOCK = threading.Lock()
+_REQ_EVENTS: "deque[Dict[str, Any]]" = deque(maxlen=10000)
+_REQ_STATS: Dict[str, Any] = {
+    "start_ts": _time_for_tracker.time(),
+    "total_calls": 0,
+    "rest_calls": 0,
+    "cli_calls": 0,
+    "successes": 0,
+    "failures": 0,
+    "by_status": {},          # {200: N, 429: M, 503: K, "ERR": E, ...}
+    "by_model": {},           # {"gemini-2.5-flash": N, ...}
+    "tokens_in": 0,
+    "tokens_out": 0,
+}
+_REQ_TRACK_VERBOSE = os.environ.get("LLM_TRACK_VERBOSE", "0") == "1"
+_REQ_TRACK_FILE = os.environ.get("LLM_TRACK_FILE", "logs/request_stats.jsonl")
+_REQ_STATS_EVERY = int(os.environ.get("LLM_TRACK_EVERY", "10"))
+
+
+def _record_request(
+    transport: str,            # "REST" or "CLI"
+    model: str,
+    status_code: int,          # 200 / 429 / 503 / -1 for CLI / -2 for exception
+    elapsed_ms: float,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    error: Optional[str] = None,
+) -> None:
+    """Record a single Gemini call. Cheap; no IO unless verbose."""
+    now = _time_for_tracker.time()
+    event = {
+        "ts": now,
+        "transport": transport,
+        "model": model,
+        "status": status_code,
+        "elapsed_ms": round(elapsed_ms, 1),
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "error": (error or "")[:200],
+    }
+    with _REQ_LOCK:
+        _REQ_EVENTS.append(event)
+        s = _REQ_STATS
+        s["total_calls"] += 1
+        if transport == "REST":
+            s["rest_calls"] += 1
+        elif transport == "CLI":
+            s["cli_calls"] += 1
+        if 200 <= status_code < 300:
+            s["successes"] += 1
+        else:
+            s["failures"] += 1
+        s["by_status"][str(status_code)] = s["by_status"].get(str(status_code), 0) + 1
+        s["by_model"][model] = s["by_model"].get(model, 0) + 1
+        s["tokens_in"] += tokens_in
+        s["tokens_out"] += tokens_out
+
+    # Append to file (best-effort, never blocks).
+    try:
+        os.makedirs(os.path.dirname(_REQ_TRACK_FILE) or ".", exist_ok=True)
+        with open(_REQ_TRACK_FILE, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(event) + "\n")
+    except Exception:
+        pass
+
+    if _REQ_TRACK_VERBOSE and s["total_calls"] % _REQ_STATS_EVERY == 0:
+        print_request_stats(prefix="[req-tracker] ")
+
+
+def _rate_in_last(seconds: float) -> int:
+    """Count requests in the last `seconds` seconds. Cheap O(events-in-window)."""
+    now = _time_for_tracker.time()
+    cutoff = now - seconds
+    with _REQ_LOCK:
+        return sum(1 for ev in _REQ_EVENTS if ev["ts"] >= cutoff)
+
+
+def print_request_stats(prefix: str = "[req-tracker] ") -> None:
+    """Print a human-readable summary of Gemini request activity to stderr."""
+    with _REQ_LOCK:
+        s = dict(_REQ_STATS)  # snapshot
+    elapsed = max(1.0, _time_for_tracker.time() - s["start_ts"])
+    rpm_60 = _rate_in_last(60.0)
+    rpm_300 = _rate_in_last(300.0) / 5.0  # avg over last 5 min
+    summary = (
+        f"{prefix}n={s['total_calls']} "
+        f"(REST={s['rest_calls']}, CLI={s['cli_calls']}, "
+        f"ok={s['successes']}, fail={s['failures']}) | "
+        f"last60s={rpm_60} rpm | avg5min={rpm_300:.1f} rpm | "
+        f"by_status={s['by_status']} | "
+        f"tokens=(in={s['tokens_in']}, out={s['tokens_out']}) | "
+        f"elapsed={int(elapsed)}s"
+    )
+    print(summary, file=sys.stderr, flush=True)
+
+
+# Make the tracker accessible as exports
+__all__ = list(globals().get("__all__", []) or []) + [
+    "_record_request", "print_request_stats",
+]
+
+
 def _gemini_resolve_model_id(model_id: str, *, timeout_s: Optional[int] = None) -> str:
     api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
@@ -199,18 +322,31 @@ def _gemini_cli_generate_simple(prompt: str, model_id: str, *, timeout_s: Option
     Honours GEMINI_CLI_BIN env var, like the prover does.
     """
     import subprocess
+    import time as _time
     from shutil import which
     bin_path = os.getenv("GEMINI_CLI_BIN", "gemini")
     if which(bin_path) is None:
+        _record_request("CLI", model_id, -1, 0.0, error="cli not found on PATH")
         raise RuntimeError(f"gemini CLI not found at {bin_path!r}")
     cmd = [bin_path, "-m", model_id, "-p", prompt]
-    proc = subprocess.run(
-        cmd, input=b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=timeout_s or OLLAMA_TIMEOUT_S, env=os.environ.copy()
-    )
+    _t0 = _time.time()
+    try:
+        proc = subprocess.run(
+            cmd, input=b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=timeout_s or OLLAMA_TIMEOUT_S, env=os.environ.copy()
+        )
+    except Exception as e:
+        _elapsed = (_time.time() - _t0) * 1000.0
+        _record_request("CLI", model_id, -2, _elapsed, error=f"{type(e).__name__}: {str(e)[:120]}")
+        raise
+    _elapsed = (_time.time() - _t0) * 1000.0
     if proc.returncode != 0:
         msg = (proc.stderr or proc.stdout).decode("utf-8", "ignore").strip()
+        # CLI return codes don't map to HTTP. Use proc.returncode (typically 1) as the "status".
+        _record_request("CLI", model_id, proc.returncode, _elapsed,
+                        error=f"cli rc={proc.returncode}: {msg[:120]}")
         raise RuntimeError(f"gemini CLI failed ({proc.returncode}): {msg}")
+    _record_request("CLI", model_id, 200, _elapsed)
     return proc.stdout.decode("utf-8", "ignore").strip()
 
 def _gemini_rest_generate_simple(prompt: str, model_id: str, *, timeout_s: Optional[int] = None) -> str:
@@ -220,18 +356,64 @@ def _gemini_rest_generate_simple(prompt: str, model_id: str, *, timeout_s: Optio
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
     body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"maxOutputTokens": OLLAMA_NUM_PREDICT}}
-    resp = _SESSION.post(url, json=body, timeout=timeout_s or OLLAMA_TIMEOUT_S)
-    resp.raise_for_status()
-    data = resp.json()
-    try:
-        cands = data.get("candidates") or []
-        if cands:
-            parts = ((cands[0].get("content") or {}).get("parts")) or []
-            if parts:
-                return (parts[0].get("text") or "").strip()
-    except Exception:
-        pass
-    return str(data).strip()
+    # Retry transient server errors (503/502/504) with exponential backoff.
+    # These are Google-side hiccups, not quota issues. 1s → 2s → 4s.
+    import time as _time
+    last_err: Optional[Exception] = None
+    for attempt in range(3):
+        _t0 = _time.time()
+        try:
+            resp = _SESSION.post(url, json=body, timeout=timeout_s or OLLAMA_TIMEOUT_S)
+            _elapsed_ms = (_time.time() - _t0) * 1000.0
+            if resp.status_code in (502, 503, 504):
+                last_err = requests.exceptions.HTTPError(
+                    f"{resp.status_code} Server Error: {resp.reason} for url: {url}", response=resp
+                )
+                _record_request("REST", model_id, resp.status_code, _elapsed_ms,
+                                error=f"{resp.status_code} {resp.reason}")
+                if attempt < 2:
+                    _time.sleep(2 ** attempt)  # 1, 2, 4 seconds
+                    continue
+                resp.raise_for_status()
+            resp.raise_for_status()
+            data = resp.json()
+            # Pull usage metadata if Google returned it
+            _ti = _to = 0
+            try:
+                usage = data.get("usageMetadata") or {}
+                _ti = int(usage.get("promptTokenCount") or 0)
+                _to = int(usage.get("candidatesTokenCount") or 0)
+            except Exception:
+                pass
+            _record_request("REST", model_id, resp.status_code, _elapsed_ms,
+                            tokens_in=_ti, tokens_out=_to)
+            try:
+                cands = data.get("candidates") or []
+                if cands:
+                    parts = ((cands[0].get("content") or {}).get("parts")) or []
+                    if parts:
+                        return (parts[0].get("text") or "").strip()
+            except Exception:
+                pass
+            return str(data).strip()
+        except requests.exceptions.HTTPError as e:
+            _elapsed_ms = (_time.time() - _t0) * 1000.0
+            code = e.response.status_code if e.response is not None else 0
+            _record_request("REST", model_id, code, _elapsed_ms,
+                            error=f"HTTPError {code}: {str(e)[:120]}")
+            # Only retry transient server errors; let 4xx (auth/quota) propagate.
+            if code in (502, 503, 504) and attempt < 2:
+                last_err = e
+                _time.sleep(2 ** attempt)
+                continue
+            raise
+        except Exception as e:
+            _elapsed_ms = (_time.time() - _t0) * 1000.0
+            _record_request("REST", model_id, -2, _elapsed_ms, error=f"{type(e).__name__}: {str(e)[:120]}")
+            raise
+    if last_err:
+        raise last_err
+    raise RuntimeError("Gemini REST: all retries failed silently")
 
 # --- Per-goal LLM call budget ---------------------------------------------
 # Prevents a single unprovable goal from making hundreds of LLM calls during

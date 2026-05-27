@@ -139,9 +139,46 @@ def precheck_nitpick_refutes(isabelle, session_id: str, steps_with_candidate: Li
 import re
 from typing import List
 
-# More comprehensive regex patterns for Sledgehammer output
-_SLEDGE_BY = re.compile(r"(?i)(?:try this:\s*)?(by\s+\([^)]+\)|by\s+\w+(?:\s+[^)\n]*)?)", re.MULTILINE)
-_SLEDGE_APPLY = re.compile(r"(?i)(?:try this:\s*)?(apply\s+\([^)]+\)|apply\s+\w+(?:\s+[^)\n]*)?)", re.MULTILINE)
+# More comprehensive regex patterns for Sledgehammer output.
+# NOTE: the `[^)]+\)` form is BROKEN for tactics whose arguments contain inner
+# parens (e.g. `by (metis foo inf_sup_aci(1) bar)` — the regex truncates at the
+# `)` after `1` rather than the matching `)` of the outer `(metis ...)`).
+# We keep these for the simple-tactic-name case, but use a paren-balancing
+# extractor (_extract_paren_balanced_after) for the `(...)` argument case.
+_SLEDGE_BY = re.compile(r"(?i)(?:try this:\s*)?(by\s+\w+(?:\s+[^)\n]*)?)", re.MULTILINE)
+_SLEDGE_APPLY = re.compile(r"(?i)(?:try this:\s*)?(apply\s+\w+(?:\s+[^)\n]*)?)", re.MULTILINE)
+# Markers for the paren-balanced form (matched separately below).
+_SLEDGE_BY_PAREN_START = re.compile(r"(?i)(?:try this:\s*)?(by\s+)\(", re.MULTILINE)
+_SLEDGE_APPLY_PAREN_START = re.compile(r"(?i)(?:try this:\s*)?(apply\s+)\(", re.MULTILINE)
+
+
+def _extract_paren_balanced_after(text: str, paren_open_pos: int) -> int:
+    """Given text and the index of an opening `(`, return the index AFTER its
+    matching `)` using depth counting. Returns -1 if unbalanced.
+    Ignores parens inside double-quoted strings."""
+    depth = 0
+    in_str = False
+    i = paren_open_pos
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if ch == '\\' and i + 1 < n:
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        i += 1
+    return -1
 _SLEDGE_METIS_LINE = re.compile(r"(?i)^.*?metis\b.*?:\s*(.*)$", re.MULTILINE)
 _SLEDGE_SIMP_LINE = re.compile(r"(?i)(?:try this:\s*)?(simp(?:\s+add:\s*[^)\n]*)?)", re.MULTILINE)
 _SLEDGE_AUTO_LINE = re.compile(r"(?i)(?:try this:\s*)?(auto(?:\s+[^)\n]*)?)", re.MULTILINE)
@@ -162,13 +199,39 @@ def _normalize_finisher_text(s: str) -> str:
 def _extract_sledge_by_lines(text: str) -> List[str]:
     out: List[str] = []
 
-    # "by ..." lines
+    # "by (...)" lines — paren-balanced extractor. Handles inner parens like
+    # `by (metis foo_aci(1) bar)` which the old regex truncated to
+    # `by (metis foo_aci(1)`.
+    for match in _SLEDGE_BY_PAREN_START.finditer(text):
+        head = match.group(1)  # "by " (with optional whitespace)
+        paren_start = match.end() - 1  # position of the opening `(`
+        paren_end = _extract_paren_balanced_after(text, paren_start)
+        if paren_end == -1:
+            continue
+        full = head + text[paren_start:paren_end]
+        suggestion = _normalize_finisher_text(full)
+        if suggestion and suggestion not in out:
+            out.append(suggestion)
+
+    # "apply (...)" lines — same treatment
+    for match in _SLEDGE_APPLY_PAREN_START.finditer(text):
+        head = match.group(1)
+        paren_start = match.end() - 1
+        paren_end = _extract_paren_balanced_after(text, paren_start)
+        if paren_end == -1:
+            continue
+        full = head + text[paren_start:paren_end]
+        suggestion = _normalize_finisher_text(full)
+        if suggestion and suggestion not in out:
+            out.append(suggestion)
+
+    # "by NAME" lines (no parens) — kept simple
     for match in _SLEDGE_BY.finditer(text):
         suggestion = _normalize_finisher_text(match.group(1))
         if suggestion and suggestion not in out:
             out.append(suggestion)
 
-    # "apply ..." lines
+    # "apply NAME" lines (no parens)
     for match in _SLEDGE_APPLY.finditer(text):
         suggestion = _normalize_finisher_text(match.group(1))
         if suggestion and suggestion not in out:

@@ -93,6 +93,11 @@ _UNICODE_FIXES: list[tuple[str, str]] = [
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+_BINDER_TYPE_SPACE = re.compile(
+    r"(\b(?:LEAST|GREATEST|SOME|THE|MIN|MAX)\s+[A-Za-z_][A-Za-z0-9_]*)\s+::"
+)
+
+
 def normalize_goal(goal: str) -> str:
     """Return a normalized form of `goal` suitable for Isabelle parsing.
 
@@ -108,6 +113,14 @@ def normalize_goal(goal: str) -> str:
     for bad, good in _UNICODE_FIXES:
         if bad in out:
             out = out.replace(bad, good)
+
+    # (3) Tighten stray whitespace in binder type ascriptions.
+    # MiniF2F goals sometimes ship as `LEAST x ::nat. P x` (note the space
+    # before `::`). Isabelle's binder parser rejects this with
+    # `Inner syntax error / Failed to parse prop`. The canonical form is
+    # `LEAST x::nat. P x` (no space). We collapse the space for the common
+    # binders: LEAST/GREATEST/SOME/THE/MIN/MAX.
+    out = _BINDER_TYPE_SPACE.sub(r"\1::", out)
 
     return out
 
@@ -144,6 +157,9 @@ if __name__ == "__main__":
         "A ⟹ A ∨ B",
         # Compound: both kinds of normalization at once
         "sum_case f g (Inl x) = f x ⟹ sym (r⁻¹)",
+        # Stray space in binder type ascription (MiniF2F)
+        "(LEAST x ::nat. [30 * x = 42] (mod 47)) = 39",
+        "(GREATEST n ::nat. n ≤ 10) = 10",
     ]
     for s in samples:
         n = normalize_goal(s)

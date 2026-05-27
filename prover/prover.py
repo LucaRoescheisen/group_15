@@ -123,6 +123,24 @@ def try_finish(
             for msg in (node.get('messages') or []):
                 if msg.get('kind') == 'error':
                     print(f"[try_finish DEBUG] error: {msg.get('message','')[:300]}", file=sys.stderr)
+        # If we got NO FINISHED block at all (resps empty / nothing surfaced),
+        # dump raw response types so we can tell whether the server rejected the
+        # whole theory (bad import, stale session, etc.) vs the tactic.
+        if not d.get('nodes') and not d.get('timeout'):
+            try:
+                import sys as _sys
+                from .isabelle_api import _get_field, _normalize_type, _decode_body_to_dict
+                seen_any = False
+                for r in (resps or []):
+                    seen_any = True
+                    rtype = _normalize_type(_get_field(r, ("response_type", "type", "kind", "tag", "name")))
+                    body = _decode_body_to_dict(_get_field(r, ("response_body", "body", "message", "payload")))
+                    snippet = str(body)[:300] if body else ""
+                    print(f"[try_finish DEBUG] raw resp: type={rtype} body={snippet}", file=_sys.stderr)
+                if not seen_any:
+                    print("[try_finish DEBUG] raw resp: <empty response list — server returned nothing>", file=_sys.stderr)
+            except Exception as _e:
+                print(f"[try_finish DEBUG] raw resp dump failed: {_e}", file=_sys.stderr)
     return ok, (time.monotonic() - t0) * 1000
 
 
@@ -307,7 +325,53 @@ def prove_goal(isabelle, session_id: str, goal: str, model_name_or_ensemble: str
             if not beam: why.append("no beam")
             if sledge_every > 1 and (depth % sledge_every) != 0: why.append(f"depth {depth} not multiple of sledge_every={sledge_every}")
             if not why: why.append("unknown condition")
-            print(color(use_color, "yellow", f"Sledgehammer skipped ({', '.join(why)})"))                
+            print(color(use_color, "yellow", f"Sledgehammer skipped ({', '.join(why)})"))
+
+        # ---- EAGER SLEDGE VERIFICATION ----
+        # Sledgehammer is a trusted oracle: if it returned candidates, verify them
+        # IMMEDIATELY before invoking any LLM (LLM calls are slow and can exhaust
+        # the budget on their own, blocking the verification loop downstream).
+        # Previously, sledge candidates joined the LLM ones in a single loop that
+        # ran AFTER `propose_finishers` (15-30s on local LLMs). On qwen3:8b, by
+        # the time the loop reached the sledge candidate, `time_left_s() <= 0`
+        # and the loop broke without testing — wasting a valid proof.
+        if sledge_sugs and beam:
+            _first_steps = beam[0][1]  # seed steps including the lemma line
+            # Filter out garbage that Sledgehammer parsing sometimes leaks
+            # (e.g. JSON message bodies escaping into the candidate list).
+            _clean_sugs = [
+                s for s in sledge_sugs
+                if "{" not in s and '"' not in s and len(s) < 200
+                   and (s.startswith("by ") or s.strip() == "done")
+            ]
+            for _fin in _clean_sugs:
+                if time_left_s() <= 1:
+                    break
+                # Reserved budget: 8s per sledge candidate. Sledge proofs verify
+                # in <2s in the common case; cap at 8s for metis pathologies.
+                _per = max(2, min(8, int(time_left_s())))
+                try:
+                    _ok, _elapsed = try_finish(isabelle, session_id, _first_steps, _fin, timeout_s=_per)
+                except Exception as _ex:
+                    if trace:
+                        print(color(use_color, "yellow", f"  sledge-eager ! [{_fin}] EXC {type(_ex).__name__}: {_ex}"), flush=True)
+                    continue
+                if trace:
+                    _tag = color(use_color, "green", "✓") if _ok else color(use_color, "red", "×")
+                    print(f"  sledge-eager {_tag} {_fin}  ({round(_elapsed)}ms)", flush=True)
+                if _ok:
+                    # COMMIT immediately. Skip LLM, skip beam, skip everything.
+                    _final = _first_steps + [_fin]
+                    logger.finish(True, _final, depth_reached, use_calls_count())
+                    if save_dir:
+                        from .isabelle_api import build_theory as _bt
+                        write_theory_file(os.path.join(save_dir, slugify_goal(goal) + ".thy"),
+                                          _bt(_final, False, None))
+                    if trace:
+                        print(color(use_color, "green", "✔ PROVED (sledge-eager)"))
+                    return {"goal": goal, "success": True, "steps": _final, "depth": depth_reached,
+                            "use_calls": use_calls_count(), "elapsed_s": logger.elapsed_s,
+                            "model": display_model}
 
         # ---- Try to finish ----
         for j, (_, steps, state_hint, _) in enumerate(beam):

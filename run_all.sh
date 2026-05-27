@@ -99,7 +99,7 @@ run() {
 #'
 #
 ## ----- Tier 1: Prover -----
-#PROVER_FLAGS="--beam 3 --max-depth 6 --facts-limit 6 --sledge --reranker on --no-minimize \
+#PROVER_FLAGS="--beam 3 --max-depth 6 --facts-limit 6 --sledge --reranker both --no-minimize \
 #              --model gemini:gemini-3-flash-preview --shuffle --seed 42"
 #
 #run "t1_prover_lists" bash -c "
@@ -131,18 +131,21 @@ run() {
 #  python -u -m prover.experiments bench --file datasets/hol_main_mid_goals_test.txt --timeout 120 $PROVER_FLAGS \
 #    2>&1 | tee logs/t1_prover_mid_test.log
 #"
-
 #run "t1_prover_hard_test" bash -c "
 #  python -u -m prover.experiments bench --file datasets/hol_main_hard_goals_test.txt --timeout 200 \
 #   --beam 3 --max-depth 8 --facts-limit 8 --sledge --reranker on --no-minimize \
 #    --model gemini:gemini-3-flash-preview --shuffle --seed 42 \
-##   2>&1 | tee logs/t1_prover_hard_test.log
+#    2>&1 | tee logs/t1_prover_hard_test.log
 #"
 
 # ----- Tier 1: Planner -----
-PLAN_FLAGS='--mode auto --diverse --k 3 --temps "0.35,0.55,0.85" --strict-no-sorry --verify \
-            --model gemini:gemini-3-flash-preview --shuffle --seed 42 --trace'
-
+PLAN_FLAGS='--mode auto --diverse --k 3 --temps "0.35,0.55,0.85" \
+            --strict-no-sorry --verify \
+            --context-hints --lib-templates \
+            --hintlex datasets/isar_hintlex.json \
+            --priors datasets/isar_priors.json \
+            --alpha 1.0 --beta 0.6 --gamma 0.25 \
+            --model qwen3:8b --shuffle --seed 42 --trace'
 #run "t1_planner_lists" bash -c "
 #  python -u -m planner.experiments bench --file datasets/lists.txt --timeout 60 $PLAN_FLAGS \
 #    2>&1 | tee logs/t1_planner_lists.log
@@ -173,6 +176,9 @@ PLAN_FLAGS='--mode auto --diverse --k 3 --temps "0.35,0.55,0.85" --strict-no-sor
 #    2>&1 | tee logs/t1_planner_mid_test.log
 #"
 
+
+#python -u -m planner.experiments bench --file datasets/hol_main_hard_goals_test.txt --timeout 200 --mode auto --diverse --k 3 --temps "0.35,0.55,0.85" --strict-no-sorry --verify --context-hints --hintlex datasets/isar_hintlex.json --priors datasets/isar_priors.json --alpha 1.0 --beta 0.6 --gamma 0.25 --model gemini:gemini-2.5-flash --shuffle --seed 42 --trace
+             
 run "t1_planner_hard_test" bash -c "
   python -u -m planner.experiments bench --file datasets/hol_main_hard_goals_test.txt --timeout 200 $PLAN_FLAGS \
     2>&1 | tee logs/t1_planner_hard_test.log
